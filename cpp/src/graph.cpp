@@ -153,6 +153,16 @@ public:
             if (p_ >= s_.size()) fail("unterminated string");
             char c = s_[p_++];
             if (c == '"') break;
+            if (static_cast<unsigned char>(c) >= 0x80) {
+                // UTF-8 (other JSON writers emit characters, not \u escapes). File strings are
+                // single bytes, so only U+0080..U+00FF are valid: 110000xx 10xxxxxx.
+                const unsigned char b0 = static_cast<unsigned char>(c);
+                const unsigned char b1 = p_ < s_.size() ? static_cast<unsigned char>(s_[p_]) : 0;
+                if ((b0 & 0xFE) != 0xC2 || (b1 & 0xC0) != 0x80) fail("text character above U+00FF is not a byte");
+                ++p_;
+                out += static_cast<char>(((b0 & 0x03) << 6) | (b1 & 0x3F));
+                continue;
+            }
             if (c != '\\') { out += c; continue; }
             char e = s_[p_++];
             switch (e) {

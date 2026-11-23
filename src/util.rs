@@ -84,6 +84,11 @@ pub const BACKUPS_KEPT: usize = 5;
 /// Copy `file` into `backup_dir` as `<name>.<timestamp>`, keeping the newest
 /// [`BACKUPS_KEPT`] backups of that file.
 pub fn backup_file(file: &Path, backup_dir: &Path) -> io::Result<PathBuf> {
+    backup_file_keep(file, backup_dir, BACKUPS_KEPT)
+}
+
+/// [`backup_file`] keeping the newest `keep` backups.
+pub fn backup_file_keep(file: &Path, backup_dir: &Path, keep: usize) -> io::Result<PathBuf> {
     fs::create_dir_all(backup_dir)?;
     let base = file_name(file);
     let dest = backup_dir.join(format!("{}.{}", base, timestamp()));
@@ -102,8 +107,8 @@ pub fn backup_file(file: &Path, backup_dir: &Path) -> io::Result<PathBuf> {
         })
         .collect();
     old.sort_by_key(|p| file_name(p));
-    if old.len() > BACKUPS_KEPT {
-        for p in &old[..old.len() - BACKUPS_KEPT] {
+    if old.len() > keep {
+        for p in &old[..old.len() - keep] {
             let _ = fs::remove_file(p);
         }
     }

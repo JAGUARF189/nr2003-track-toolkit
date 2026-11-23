@@ -16,6 +16,10 @@ pub struct Settings {
     /// Stock track whose ini/cam/sim/lp files seed new tracks.
     pub template_track: String,
     pub last_track: String,
+    /// Track tab: save changes automatically.
+    pub autosave: bool,
+    /// Track tab: seconds between automatic saves (only when there are unsaved changes).
+    pub autosave_secs: u64,
 }
 
 impl Default for Settings {
@@ -26,6 +30,8 @@ impl Default for Settings {
             workspace_dir: PathBuf::from(r"C:\Papyrus\TrackWorkspace\tracks"),
             template_track: "hillside".into(),
             last_track: String::new(),
+            autosave: true,
+            autosave_secs: 300,
         }
     }
 }
@@ -60,6 +66,11 @@ impl Settings {
 
     pub fn save(&self) -> Result<()> {
         self.save_to(&Self::default_path())
+    }
+
+    /// Where autosave keeps safety copies of tracks that don't have a save location yet.
+    pub fn recovery_dir() -> PathBuf {
+        Self::default_path().parent().map(Path::to_path_buf).unwrap_or_default().join("autosave")
     }
 
     pub fn game_tracks(&self) -> PathBuf {

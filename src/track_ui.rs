@@ -4,8 +4,11 @@
 use eframe::egui::{self, Color32, RichText, Sense};
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
+use ttk::config::Settings;
+
+mod saving;
 use ttk::track::mesh::{self, TrackMesh, VERTEX_FLOATS};
 use ttk::track::model::{self, surface_name, wall_name, Track, FEET_PER_METRE, METRES_PER_MILE};
 use ttk::track::graph;
@@ -13,6 +16,8 @@ use ttk::track::graph;
 pub struct TrackEnv<'a> {
     /// (name, folder) of tracks installed in the game
     pub game_tracks: &'a [(String, PathBuf)],
+    /// The workspace `tracks` folder (where Save first suggests putting a track from a .dat)
+    pub workspace: &'a Path,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -24,8 +29,13 @@ enum View {
 struct Loaded {
     name: String,
     source: String,
+    graph: graph::Graph,
     track: Track,
     mesh: TrackMesh,
+    /// Where Save writes: the .ptf it came from, or None for a track read out of a .dat.
+    save_path: Option<PathBuf>,
+    /// An earlier version (backup) opened to be put back.
+    restored: bool,
 }
 
 struct Camera {
@@ -64,6 +74,8 @@ pub struct TrackView {
     select_on_load: Option<usize>,
     /// Fit the camera on the next frame (needs the viewport size).
     fit_pending: bool,
+    ed: saving::EditState,
+    workspace: Option<PathBuf>,
     scene: Arc<Mutex<Scene>>,
 }
 
@@ -83,23 +95,38 @@ impl Default for TrackView {
             aspect: 1.4,
             select_on_load: None,
             fit_pending: false,
+            ed: Default::default(),
+            workspace: None,
             scene: Arc::new(Mutex::new(Scene::default())),
         }
     }
 }
 
 impl TrackView {
-    fn open(&mut self, ctx: &egui::Context, name: String, path: PathBuf) {
+    /// Load a track in the background. `restore_to`: `path` is an earlier version of that file.
+    fn open(&mut self, ctx: &egui::Context, name: String, path: PathBuf, restore_to: Option<PathBuf>) {
         let (tx, rx) = mpsc::channel();
         let (walls, objects) = (self.show_walls, self.show_objects);
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
             let r = (|| -> anyhow::Result<Loaded> {
-                let (bytes, source) = graph::load_ptf_bytes(&path)?;
+                // Backups are named <file>.ptf.<timestamp>, so read those as .ptf whatever the name.
+                let (bytes, mut source) = if restore_to.is_some() {
+                    (std::fs::read(&path)?, path.display().to_string())
+                } else {
+                    graph::load_ptf_bytes(&path)?
+                };
                 let g = graph::parse_ptf(&bytes)?;
                 let track = Track::from_graph(&g)?;
                 let mesh = mesh::build(&track, walls, objects);
-                Ok(Loaded { name, source, track, mesh })
+                let restored = restore_to.is_some();
+                let save_path = restore_to.or_else(|| {
+                    (ttk::util::ext_lower(&path) == "ptf").then(|| path.clone())
+                });
+                if restored {
+                    source = format!("earlier version: {source}");
+                }
+                Ok(Loaded { name, source, graph: g, track, mesh, save_path, restored })
             })();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
@@ -116,7 +143,7 @@ impl TrackView {
         if three_d {
             self.view = View::ThreeD;
         }
-        self.open(ctx, name, path);
+        self.open(ctx, name, path, None);
     }
 
     fn poll(&mut self) {
@@ -125,7 +152,9 @@ impl TrackView {
             Ok(Ok(mut l)) => {
                 self.scene.lock().unwrap().pending = Some(std::mem::take(&mut l.mesh.verts));
                 self.selected = None;
+                let restored = l.restored;
                 self.loaded = Some(l);
+                self.reset_edits(restored);
                 self.loading = None;
                 self.fit_pending = true;
             }
@@ -174,17 +203,21 @@ impl TrackView {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, env: &TrackEnv) {
+    pub fn show(&mut self, ctx: &egui::Context, env: &TrackEnv, settings: &mut Settings) {
         self.poll();
+        self.workspace = Some(env.workspace.to_path_buf());
+        if self.loaded.is_some() && self.ed.pending.is_none() {
+            self.shortcuts(ctx);
+        }
         egui::SidePanel::left("track_side").resizable(true).default_width(370.0).show(ctx, |ui| {
-            self.side_panel(ui, ctx, env);
+            self.side_panel(ui, ctx, env, settings);
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
             self.viewport(ui);
         });
     }
 
-    fn side_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, env: &TrackEnv) {
+    fn side_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, env: &TrackEnv, settings: &mut Settings) {
         ui.add_space(6.0);
         ui.label(RichText::new("Look at a track").size(18.0).strong());
         ui.label("Pick a track from the game, or open a .ptf or .dat file.");
@@ -213,8 +246,7 @@ impl TrackView {
             }
         });
         if let Some((name, path)) = open {
-            self.picked = Some(name.clone());
-            self.open(ctx, name, path);
+            self.request_open(ctx, name, path);
         }
         if self.loading.is_some() {
             ui.horizontal(|ui| {
@@ -243,12 +275,23 @@ impl TrackView {
             ui.label("Objects");
             ui.label(format!("{} placed", t.objects.len()));
             ui.end_row();
-            ui.label("Lighting");
-            ui.label(if t.night { "Night" } else { "Day" });
-            ui.end_row();
         })
         .response
         .on_hover_text(&l.source);
+
+        // Lighting: the first thing that can be changed and saved.
+        let night_now = t.night;
+        let mut night = night_now;
+        ui.horizontal(|ui| {
+            ui.label("Lighting");
+            ui.radio_value(&mut night, false, "Day");
+            ui.radio_value(&mut night, true, "Night");
+        });
+        if night != night_now {
+            self.set_night(night);
+        }
+        ui.add_space(2.0);
+        self.save_panel(ui, ctx, settings);
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {

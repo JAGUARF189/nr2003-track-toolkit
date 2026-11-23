@@ -2,7 +2,7 @@
 //! Every object is a class name plus its fields in file order; see docs/ptf/classes.md.
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ struct FileJson {
     objects: Vec<Node>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Node {
     pub id: i32,
     pub class: String,
@@ -48,8 +48,30 @@ impl Node {
     pub fn s(&self, name: &str) -> Option<&str> {
         self.get(name).and_then(Value::as_str)
     }
+    /// Change a field's value; returns the old value. Fails if the field doesn't exist.
+    pub fn set(&mut self, name: &str, v: Value) -> Result<Value> {
+        let class = self.class.clone();
+        let f = self
+            .fields
+            .iter_mut()
+            .find(|f| f.0 == name)
+            .with_context(|| format!("{class} has no field {name}"))?;
+        Ok(std::mem::replace(&mut f.2, v))
+    }
 }
 
+/// Same value, comparing numbers by value (so 2 == 2.0) and everything else exactly.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
+            (Some(i), Some(j)) => i == j,
+            _ => x.as_f64().map(f64::to_bits) == y.as_f64().map(f64::to_bits),
+        },
+        _ => a == b,
+    }
+}
+
+#[derive(Clone)]
 pub struct Graph {
     pub root: i32,
     pub trailer: String,
@@ -68,6 +90,54 @@ impl Graph {
 
     pub fn node(&self, id: i32) -> Option<&Node> {
         self.nodes.get(&id)
+    }
+
+    pub fn node_mut(&mut self, id: i32) -> Option<&mut Node> {
+        self.nodes.get_mut(&id)
+    }
+
+    /// The ptfjson text form (objects in id order), which `ptfjson write` turns into a .ptf.
+    pub fn to_json(&self) -> Result<String> {
+        let mut ids: Vec<i32> = self.nodes.keys().copied().collect();
+        ids.sort_unstable();
+        #[derive(Serialize)]
+        struct Out<'a> {
+            format: &'static str,
+            version: u32,
+            root: i32,
+            trailer: &'a str,
+            objects: Vec<&'a Node>,
+        }
+        let out = Out {
+            format: "ptfjson",
+            version: 1,
+            root: self.root,
+            trailer: &self.trailer,
+            objects: ids.iter().map(|id| &self.nodes[id]).collect(),
+        };
+        Ok(serde_json::to_string(&out)?)
+    }
+
+    /// Explain the first difference from `other`, or None if both hold the same track.
+    pub fn difference(&self, other: &Graph) -> Option<String> {
+        if self.root != other.root || self.trailer != other.trailer {
+            return Some("the file header differs".into());
+        }
+        if self.nodes.len() != other.nodes.len() {
+            return Some(format!("{} objects instead of {}", other.nodes.len(), self.nodes.len()));
+        }
+        for (id, a) in &self.nodes {
+            let Some(b) = other.nodes.get(id) else { return Some(format!("object {id} is missing")) };
+            if a.class != b.class || a.fields.len() != b.fields.len() {
+                return Some(format!("object {id} ({}) differs", a.class));
+            }
+            for (fa, fb) in a.fields.iter().zip(&b.fields) {
+                if fa.0 != fb.0 || fa.1 != fb.1 || !same_value(&fa.2, &fb.2) {
+                    return Some(format!("object {id} ({}) field {} differs", a.class, fa.0));
+                }
+            }
+        }
+        None
     }
 
     pub fn root(&self) -> &Node {
@@ -116,23 +186,50 @@ pub fn parse_ptf(bytes: &[u8]) -> Result<Graph> {
             .unwrap_or(0)
     ));
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    let mut cmd = Command::new(&tool);
-    cmd.arg("read").arg(&tmp).arg("-").stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = run_ptfjson(&tool, &["read".as_ref(), tmp.as_os_str(), "-".as_ref()]);
+    let _ = std::fs::remove_file(&tmp);
+    let out = out.map_err(|e| anyhow::anyhow!("couldn't read the track file: {e}"))?;
+    let text = String::from_utf8(out).context("ptfjson output is not text")?;
+    Graph::from_json(&text)
+}
+
+/// Read a .ptf file into a graph.
+pub fn read_ptf_file(path: &Path) -> Result<Graph> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_ptf(&bytes)
+}
+
+/// Write a graph to `dest` as a .ptf (via ptfjson). Doesn't check the result; see save.rs.
+pub fn write_ptf(g: &Graph, dest: &Path) -> Result<()> {
+    write_ptf_json(&g.to_json()?, dest)
+}
+
+/// Write ptfjson text to `dest` as a .ptf.
+pub fn write_ptf_json(json: &str, dest: &Path) -> Result<()> {
+    let tool = find_ptfjson().context("ptfjson.exe was not found next to track-toolkit.exe")?;
+    let json_path = dest.with_extension("ptfjson.tmp");
+    std::fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    let r = run_ptfjson(&tool, &["write".as_ref(), json_path.as_os_str(), dest.as_os_str()]);
+    let _ = std::fs::remove_file(&json_path);
+    r.map(|_| ()).map_err(|e| anyhow::anyhow!("couldn't write the track: {e}"))
+}
+
+/// Run ptfjson without a console window; Ok(stdout) or Err(its error message).
+fn run_ptfjson(tool: &Path, args: &[&std::ffi::OsStr]) -> std::result::Result<Vec<u8>, String> {
+    let mut cmd = Command::new(tool);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output();
-    let _ = std::fs::remove_file(&tmp);
-    let out = out.with_context(|| format!("running {}", tool.display()))?;
+    let out = cmd.output().map_err(|e| format!("running {}: {e}", tool.display()))?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr);
-        bail!("couldn't read the track file: {}", msg.trim().trim_start_matches("error: "));
+        return Err(msg.trim().trim_start_matches("error: ").to_string());
     }
-    let text = String::from_utf8(out.stdout).context("ptfjson output is not text")?;
-    Graph::from_json(&text)
+    Ok(out.stdout)
 }
 
 /// The .ptf bytes for a track: a loose `.ptf` file, or the `.ptf` inside a `.dat`.

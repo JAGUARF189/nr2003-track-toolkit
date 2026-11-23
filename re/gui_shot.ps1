@@ -1,6 +1,6 @@
 # Launch the toolkit GUI with test settings, optionally click points, and screenshot it.
-# usage: gui_shot.ps1 -Out shot.png [-Clicks "x,y;x,y"] [-Keep]
-param([string]$Out, [string]$Clicks = "", [switch]$Keep, [int]$Wait = 4)
+# usage: gui_shot.ps1 -Out shot.png [-Clicks "x,y;x,y"] [-Keep] [-AppArgs "file.ptf"]
+param([string]$Out, [string]$Clicks = "", [switch]$Keep, [int]$Wait = 4, [string]$AppArgs = "")
 $e = "C:\Papyrus\TrackToolkit\_test\e2e"
 New-Item -ItemType Directory -Force "$e\appdata\TrackToolkit" | Out-Null
 Copy-Item "$e\settings.json" "$e\appdata\TrackToolkit\settings.json" -Force
@@ -22,6 +22,7 @@ public class W {
 '@
 [W]::SetProcessDPIAware() | Out-Null
 $psi = New-Object System.Diagnostics.ProcessStartInfo "C:\Papyrus\TrackToolkit\target\release\track-toolkit.exe"
+$psi.Arguments = $AppArgs
 $psi.UseShellExecute = $false
 $psi.EnvironmentVariables["APPDATA"] = "$e\appdata"
 $p = [System.Diagnostics.Process]::Start($psi)

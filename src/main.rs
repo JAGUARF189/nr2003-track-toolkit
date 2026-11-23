@@ -352,6 +352,14 @@ fn log_color(l: Level, dark: bool) -> Color32 {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        // Track tab saving/autosave runs on every tab; ask before closing with unsaved changes.
+        self.track_view.tick(ctx, &self.settings);
+        if ctx.input(|i| i.viewport().close_requested()) && self.track_view.on_close_requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        if self.track_view.take_close() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let busy = self.busy();
         let mut run: Option<Vec<Step>> = None;
 
@@ -520,7 +528,12 @@ impl eframe::App for App {
                 .iter()
                 .map(|t| (t.clone(), self.settings.game_tracks().join(t)))
                 .collect();
-            self.track_view.show(ctx, &track_ui::TrackEnv { game_tracks: &folders });
+            let workspace = self.settings.workspace_dir.clone();
+            self.track_view.show(
+                ctx,
+                &track_ui::TrackEnv { game_tracks: &folders, workspace: &workspace },
+                &mut self.settings,
+            );
         } else {
             self.build_tab(ctx, busy, &mut run);
         }

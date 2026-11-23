@@ -26,6 +26,16 @@ The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file
 
 `track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N]` opens straight into this tab.
 
+### Saving and autosave
+
+- **Save / Save as… / Undo / Redo** (Ctrl+S, Ctrl+Z, Ctrl+Y). For now the one change you can make is **Lighting: Day / Night**. Editing the track itself is phase 3.
+- **Every save is checked before it counts.** The new file is written as `<name>.ptf.saving` and read back. Only if it matches does the old file go to `_ttk_backup\` (the newest 20 are kept), and then the new file takes its place. A failed save never touches your track.
+- **Autosave** runs only when there are unsaved changes. It defaults to **every 5 minutes**; set any time from 10 seconds to a week, in seconds, minutes or hours. The setting is stored in `settings.json` (`autosave`, `autosave_secs`).
+  - The countdown starts at your first unsaved change and restarts after every save.
+  - A track opened from inside a `.dat` has nowhere to save yet. Autosave keeps a safety copy in `%APPDATA%\TrackToolkit\autosave\` until you pick a place with Save.
+- **Earlier versions** lists the backups. Open one, then Save to put it back.
+- **Closing the app, or opening another track, with unsaved changes** asks first: Save / Don't save / Keep working.
+
 Tracks are read by `cpp\build\ptfjson.exe` (C++). It must sit next to `track-toolkit.exe`, or in `cpp\build\` of a source checkout. ptfjson decodes all 11 .ptf classes (see `docs\ptf\classes.md`), and writes them back byte-identical: all 55 .ptf files tested so far round-trip exactly.
 
 ```
