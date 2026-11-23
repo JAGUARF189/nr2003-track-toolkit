@@ -56,6 +56,12 @@ impl Node {
             .iter_mut()
             .find(|f| f.0 == name)
             .with_context(|| format!("{class} has no field {name}"))?;
+        // Store exactly what the file can hold, so the editor and the saved file agree.
+        let v = match (f.1.as_str(), v.as_f64()) {
+            ("f32", Some(x)) => serde_json::json!(x as f32 as f64),
+            ("i32" | "u8" | "size", Some(x)) if v.as_i64().is_none() => serde_json::json!(x.round() as i64),
+            _ => v,
+        };
         Ok(std::mem::replace(&mut f.2, v))
     }
 }
@@ -132,8 +138,20 @@ impl Graph {
                 return Some(format!("object {id} ({}) differs", a.class));
             }
             for (fa, fb) in a.fields.iter().zip(&b.fields) {
-                if fa.0 != fb.0 || fa.1 != fb.1 || !same_value(&fa.2, &fb.2) {
-                    return Some(format!("object {id} ({}) field {} differs", a.class, fa.0));
+                let same = if fa.1 == "f32" {
+                    // stored as a 32-bit float: compare at that precision
+                    match (fa.2.as_f64(), fb.2.as_f64()) {
+                        (Some(x), Some(y)) => (x as f32).to_bits() == (y as f32).to_bits(),
+                        _ => fa.2 == fb.2,
+                    }
+                } else {
+                    same_value(&fa.2, &fb.2)
+                };
+                if fa.0 != fb.0 || fa.1 != fb.1 || !same {
+                    return Some(format!(
+                        "object {id} ({}) field {}: {} in the editor, {} in the file",
+                        a.class, fa.0, fa.2, fb.2
+                    ));
                 }
             }
         }

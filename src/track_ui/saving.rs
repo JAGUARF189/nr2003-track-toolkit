@@ -13,9 +13,22 @@ use ttk::track::save;
 
 pub(super) struct EditStep {
     pub label: String,
+    /// Steps with the same key made within a moment of each other (one drag of a number)
+    /// merge into one Undo step. Empty = never merge.
+    pub key: String,
+    pub at: Instant,
     /// (object id, field, old value, new value)
     pub changes: Vec<(i32, String, Value, Value)>,
 }
+
+impl EditStep {
+    pub fn new(label: &str, key: &str, changes: Vec<(i32, String, Value, Value)>) -> Self {
+        Self { label: label.to_string(), key: key.to_string(), at: Instant::now(), changes }
+    }
+}
+
+/// How long after the last change a change to the same thing still joins its Undo step.
+const MERGE_WINDOW: Duration = Duration::from_millis(1500);
 
 pub(super) enum Pending {
     Open { name: String, path: PathBuf },
@@ -164,7 +177,11 @@ impl TrackView {
         }
         if let Ok(t) = Track::from_graph(&l.graph) {
             l.track = t;
+            let mut m = mesh::build(&l.track, self.show_walls, self.show_objects);
+            self.scene.lock().unwrap().pending = Some(std::mem::take(&mut m.verts));
+            l.mesh = m;
         }
+        self.recheck();
         if !self.dirty() {
             self.ed.clock = Instant::now();
         }
@@ -176,10 +193,24 @@ impl TrackView {
         if step.changes.iter().all(|c| c.2 == c.3) {
             return;
         }
-        if self.apply(&step, true) {
-            self.ed.undo.push(step);
-            self.ed.redo.clear();
+        if !self.apply(&step, true) {
+            return;
         }
+        self.ed.redo.clear();
+        if let Some(top) = self.ed.undo.last_mut() {
+            if !step.key.is_empty() && top.key == step.key && top.at.elapsed() < MERGE_WINDOW {
+                // Same number still being dragged/typed: one Undo step, keeping the first old values.
+                for (id, field, old, new) in step.changes {
+                    match top.changes.iter_mut().find(|c| c.0 == id && c.1 == field) {
+                        Some(c) => c.3 = new,
+                        None => top.changes.push((id, field, old, new)),
+                    }
+                }
+                top.at = Instant::now();
+                return;
+            }
+        }
+        self.ed.undo.push(step);
     }
 
     pub(super) fn undo(&mut self) {
@@ -213,7 +244,7 @@ impl TrackView {
             }
         }
         let label = if night { "Night lighting" } else { "Day lighting" };
-        self.edit(EditStep { label: label.into(), changes });
+        self.edit(EditStep::new(label, "", changes));
     }
 
     // ------------------------------------------------------------------ saving
@@ -438,6 +469,12 @@ impl TrackView {
     /// Save buttons, status, autosave setting and earlier versions.
     pub(super) fn save_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, settings: &mut Settings) {
         let saving = self.ed.job.is_some();
+        if self.crash_count() > 0 {
+            ui.colored_label(
+                Color32::from_rgb(235, 95, 85),
+                "This track has problems that will stop it loading (see Check below). It still saves, so you can fix them later.",
+            );
+        }
         ui.horizontal(|ui| {
             let save = egui::Button::new(RichText::new("Save").strong().size(15.0));
             if ui.add_enabled(!saving, save).on_hover_text("Ctrl+S").clicked() {

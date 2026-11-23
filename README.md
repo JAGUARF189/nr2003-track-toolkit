@@ -26,6 +26,29 @@ The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file
 
 `track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N]` opens straight into this tab.
 
+### Editing the shape (phase 3)
+
+Select a piece (in the list or on the map) to edit it:
+- **Shape:** straight or curve. **Length** in metres; for curves also **Turns** (degrees, left/right) and **Radius**.
+  - Changing a curve's length keeps its radius and changes the angle.
+- **Banking** at the start and end, in degrees. Positive = the outside of the turn is higher (the right side on straights).
+- **Changing the shape:** every piece after it moves with it, so the track stays joined. With "Move objects with the track" on, objects beside those pieces move too.
+  - A gap can open at the start/finish line. The checker shows how big it is.
+- **Changing banking:** the road tilts about the inside edge, and everything further out (walls, apron, run-off) moves with it. The pieces either side are adjusted, so there's no step or kink at the joins. Banking changes evenly from start to end.
+- **Undo:** dragging or typing a number makes one Undo step.
+- **After a shape change:** the AI lines (.lp), cameras and pit stalls are measured along the old track and need making again. The tab says so.
+
+**Check** lists problems, worst first. Click one to go to that piece:
+- **Won't load:**
+  - Sandbox's own load limits (sandbox.exe): headings within 0..2π, a straight bending more than 0.5°, cross-section limits, walls over 100 m tall.
+  - Anything on a curve reaching past the turn's centre.
+- **Warnings:**
+  - Gaps, kinks or steps between pieces, and a track that doesn't close.
+  - Curves over 90° (the 2003 track makers split them).
+  - Steep road (over 10% grade), and ground strips or walls off the edge of the ground.
+  - Texture/object files that can't be found.
+- **Calibration:** all 47 installed game tracks give no "won't load" findings.
+
 ### Saving and autosave
 
 - **Save / Save as… / Undo / Redo** (Ctrl+S, Ctrl+Z, Ctrl+Y). For now the one change you can make is **Lighting: Day / Night**. Editing the track itself is phase 3.

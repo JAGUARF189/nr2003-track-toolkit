@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use ttk::config::Settings;
 
+mod editor;
 mod saving;
+
+use ttk::track::check::Problem;
 use ttk::track::mesh::{self, TrackMesh, VERTEX_FLOATS};
 use ttk::track::model::{self, surface_name, wall_name, Track, FEET_PER_METRE, METRES_PER_MILE};
 use ttk::track::graph;
@@ -36,6 +39,8 @@ struct Loaded {
     save_path: Option<PathBuf>,
     /// An earlier version (backup) opened to be put back.
     restored: bool,
+    /// Textures/objects the track uses that can't be found (checked once when loading).
+    file_problems: Vec<Problem>,
 }
 
 struct Camera {
@@ -76,6 +81,12 @@ pub struct TrackView {
     fit_pending: bool,
     ed: saving::EditState,
     workspace: Option<PathBuf>,
+    /// Checker findings for the current track.
+    problems: Vec<Problem>,
+    move_objects: bool,
+    edit_error: Option<String>,
+    /// The shape changed since loading (AI lines, cameras and stalls need redoing).
+    layout_changed: bool,
     scene: Arc<Mutex<Scene>>,
 }
 
@@ -97,6 +108,10 @@ impl Default for TrackView {
             fit_pending: false,
             ed: Default::default(),
             workspace: None,
+            problems: Vec::new(),
+            move_objects: true,
+            edit_error: None,
+            layout_changed: false,
             scene: Arc::new(Mutex::new(Scene::default())),
         }
     }
@@ -126,7 +141,17 @@ impl TrackView {
                 if restored {
                     source = format!("earlier version: {source}");
                 }
-                Ok(Loaded { name, source, graph: g, track, mesh, save_path, restored })
+                // Look for the textures and objects next to the real track file.
+                let file_problems = save_path
+                    .as_ref()
+                    .or(Some(&path))
+                    .and_then(|p| p.parent())
+                    .map(|dir| {
+                        let shared = dir.parent().map(|t| t.join("shared")).filter(|d| d.is_dir());
+                        ttk::track::check::missing_files(&g, dir, shared.as_deref())
+                    })
+                    .unwrap_or_default();
+                Ok(Loaded { name, source, graph: g, track, mesh, save_path, restored, file_problems })
             })();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
@@ -155,6 +180,9 @@ impl TrackView {
                 let restored = l.restored;
                 self.loaded = Some(l);
                 self.reset_edits(restored);
+                self.layout_changed = false;
+                self.edit_error = None;
+                self.recheck();
                 self.loading = None;
                 self.fit_pending = true;
             }
@@ -292,6 +320,7 @@ impl TrackView {
         }
         ui.add_space(2.0);
         self.save_panel(ui, ctx, settings);
+        self.problems_panel(ui);
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -314,11 +343,11 @@ impl TrackView {
             self.rebuild_mesh();
         }
 
-        // Details of the selected piece
+        // The selected piece: edit its shape and banking
         if let Some(k) = self.selected {
-            if let Some(l) = &self.loaded {
+            if self.loaded.as_ref().is_some_and(|l| k < l.track.segments.len()) {
                 ui.separator();
-                piece_details(ui, &l.track.segments[k]);
+                self.piece_editor(ui, k);
             }
         }
 
@@ -331,7 +360,14 @@ impl TrackView {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for s in &l.track.segments {
                     let text = piece_line(s);
-                    let r = ui.selectable_label(self.selected == Some(s.index), RichText::new(text).monospace());
+                    let (bad, warned) = editor::marks(&self.problems, s.index);
+                    let mut rt = RichText::new(text).monospace();
+                    if bad {
+                        rt = rt.color(Color32::from_rgb(235, 95, 85));
+                    } else if warned {
+                        rt = rt.color(Color32::from_rgb(240, 190, 80));
+                    }
+                    let r = ui.selectable_label(self.selected == Some(s.index), rt);
                     if r.clicked() {
                         clicked = Some(s.index);
                     }
@@ -495,77 +531,6 @@ fn piece_line(s: &model::Segment) -> String {
         )
     } else {
         format!("{:>3}  Straight      {:>6.1}         {:>4.1}°", s.index + 1, s.length, s.banking(0.5).abs())
-    }
-}
-
-fn piece_details(ui: &mut egui::Ui, s: &model::Segment) {
-    let title = if s.curve {
-        format!("Piece {} — {} turn", s.index + 1, if s.angle > 0.0 { "left" } else { "right" })
-    } else {
-        format!("Piece {} — straight", s.index + 1)
-    };
-    ui.label(RichText::new(title).strong().size(15.0));
-    egui::Grid::new("piece_facts").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
-        ui.label("Length");
-        ui.label(format!("{:.2} m  ({:.1} ft)", s.length, s.length * FEET_PER_METRE));
-        ui.end_row();
-        if s.curve {
-            ui.label("Turns");
-            ui.label(format!("{:.2}°", s.angle.abs().to_degrees()));
-            ui.end_row();
-            ui.label("Radius");
-            ui.label(format!("{:.1} m  ({:.0} ft)", s.radius, s.radius * FEET_PER_METRE));
-            ui.end_row();
-        }
-        ui.label("Banking");
-        let (b0, b1) = (s.banking(0.0), s.banking(1.0));
-        ui.label(if (b0 - b1).abs() < 0.05 {
-            format!("{:.1}°", b0.abs())
-        } else {
-            format!("{:.1}° to {:.1}°", b0.abs(), b1.abs())
-        });
-        ui.end_row();
-        let h0 = s.height(0.0, 0.0);
-        let h1 = s.height(1.0, 0.0);
-        ui.label("Height");
-        ui.label(if (h0 - h1).abs() < 0.01 { format!("{h0:.2} m") } else { format!("{h0:.2} m to {h1:.2} m") });
-        ui.end_row();
-    });
-    // Ground from right to left, as a driver sees it
-    let strips = s.strips(0.5);
-    if !strips.is_empty() {
-        ui.label(RichText::new("Ground, right to left").weak());
-        let mut line = String::new();
-        let mut merged: Vec<(i64, f64)> = Vec::new();
-        for (a, b, surf) in strips {
-            match merged.last_mut() {
-                Some(last) if last.0 == surf => last.1 += b - a,
-                _ => merged.push((surf, b - a)),
-            }
-        }
-        for (k, (surf, w)) in merged.iter().enumerate() {
-            if k > 0 {
-                line += ",  ";
-            }
-            line += &format!("{} {:.1} m", surface_name(*surf), w);
-        }
-        ui.label(line);
-    }
-    if !s.ws.is_empty() {
-        ui.label(RichText::new("Walls").weak());
-        let mut ws: Vec<_> = s.ws.iter().collect();
-        ws.sort_by(|a, b| a.dlat[0].total_cmp(&b.dlat[0]));
-        for w in ws {
-            let d = 0.5 * (w.dlat[0] + w.dlat[1]);
-            let side = if d < 0.0 { "right" } else { "left" };
-            ui.label(format!(
-                "{}  —  {:.1} m to the {side}, {:.2} m tall",
-                wall_name(w.wall_type),
-                d.abs(),
-                0.5 * (w.height[0] + w.height[1])
-            ))
-            .on_hover_text(format!("Sandbox wall type {}", w.wall_type));
-        }
     }
 }
 

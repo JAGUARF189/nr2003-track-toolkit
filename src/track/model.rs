@@ -17,6 +17,8 @@ use std::f64::consts::PI;
 
 #[derive(Clone, Debug)]
 pub struct XSec {
+    /// Object id in the graph (for editing).
+    pub id: i32,
     pub dlat: [f64; 2],
     pub alt: [f64; 2],
     pub slope: [f64; 2],
@@ -24,12 +26,14 @@ pub struct XSec {
 
 #[derive(Clone, Debug)]
 pub struct FSec {
+    pub id: i32,
     pub dlat: [f64; 2],
     pub surface: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct WSec {
+    pub id: i32,
     pub dlat: [f64; 2],
     pub height: [f64; 2],
     pub width: [f64; 2],
@@ -38,6 +42,8 @@ pub struct WSec {
 
 #[derive(Clone, Debug)]
 pub struct Segment {
+    /// Object id in the graph (for editing).
+    pub id: i32,
     pub index: usize,
     pub curve: bool,
     pub start: [f64; 3], // x, y, heading
@@ -55,6 +61,7 @@ pub struct Segment {
 
 #[derive(Clone, Debug)]
 pub struct Placed {
+    pub id: i32,
     pub x: f64,
     pub y: f64,
     pub z: f64,
@@ -109,6 +116,7 @@ impl Track {
                 .list(s, "x", s.i("x_count"))
                 .into_iter()
                 .map(|x| XSec {
+                    id: x.id,
                     dlat: pair(x, "dlat0", "dlat1"),
                     alt: pair(x, "alt0", "alt1"),
                     slope: pair(x, "slope0", "slope1"),
@@ -117,19 +125,20 @@ impl Track {
             let fs = g
                 .list(s, "f", s.i("f_count"))
                 .into_iter()
-                .map(|f| FSec { dlat: pair(f, "dlat0", "dlat1"), surface: f.i("i15") })
+                .map(|f| FSec { id: f.id, dlat: pair(f, "dlat0", "dlat1"), surface: f.i("i15") })
                 .collect();
             let ws = g
                 .list(s, "w", s.i("w_count"))
                 .into_iter()
                 .map(|w| WSec {
+                    id: w.id,
                     dlat: pair(w, "dlat0", "dlat1"),
                     height: pair(w, "height0", "height1"),
                     width: pair(w, "width0", "width1"),
                     wall_type: w.i("wall_type"),
                 })
                 .collect();
-            segments.push(Segment { index, curve: curve && angle != 0.0, start, end, angle, radius, length, xs, fs, ws });
+            segments.push(Segment { id: s.id, index, curve: curve && angle != 0.0, start, end, angle, radius, length, xs, fs, ws });
         }
         if segments.is_empty() {
             bail!("the track has no segments");
@@ -138,6 +147,7 @@ impl Track {
             .list(root, "tsoref", root.i("tsoref_count"))
             .into_iter()
             .map(|r| Placed {
+                id: r.id,
                 x: r.f("x"),
                 y: r.f("y"),
                 z: r.f("z"),
