@@ -13,9 +13,15 @@ endif()
 add_library(ptf STATIC
   src/archive.cpp
   src/descriptors.cpp
+  src/graph.cpp
+  src/schema.cpp
 )
 target_include_directories(ptf PUBLIC src)
 
 # Read-only integrity checker.
 add_executable(ptfcheck tools/ptfcheck.cpp)
 target_link_libraries(ptfcheck PRIVATE ptf)
+
+# .ptf <-> JSON converter and round-trip checker (used by the Track Toolkit GUI).
+add_executable(ptfjson tools/ptfjson.cpp)
+target_link_libraries(ptfjson PRIVATE ptf)
