@@ -26,7 +26,7 @@ The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file
 
 `track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N]` opens straight into this tab.
 
-Tracks are read by `cppuild\ptfjson.exe` (C++). It must sit next to `track-toolkit.exe`, or in `cppuild\` of a source checkout. ptfjson decodes all 11 .ptf classes (see `docs\ptf\classes.md`), and writes them back byte-identical: all 55 .ptf files tested so far round-trip exactly.
+Tracks are read by `cpp\build\ptfjson.exe` (C++). It must sit next to `track-toolkit.exe`, or in `cpp\build\` of a source checkout. ptfjson decodes all 11 .ptf classes (see `docs\ptf\classes.md`), and writes them back byte-identical: all 55 .ptf files tested so far round-trip exactly.
 
 ```
 ptfjson read  <in.ptf> <out.json>
@@ -73,4 +73,4 @@ cargo test
 ```
 
 The C++ part (`ptfjson`, `ptfcheck`) builds with CMake and Ninja from a VS developer prompt:
-`cmake -S cpp -B cppuild -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build cppuild`
+`cmake -S cpp -B cpp\build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build cpp\build`
