@@ -9,6 +9,7 @@ use ttk::logger::{Level, Logger};
 use ttk::steps::{run_all_steps, run_steps, validate_track_name, Ctx, Step};
 
 mod textures_ui;
+mod track_ui;
 
 const MAX_LOG_LINES: usize = 10_000;
 
@@ -16,6 +17,7 @@ const MAX_LOG_LINES: usize = 10_000;
 enum Tab {
     Build,
     Textures,
+    Track,
 }
 
 fn main() -> eframe::Result<()> {
@@ -25,12 +27,31 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1060.0, 780.0])
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
+        depth_buffer: 24, // the Track tab's 3D view
         ..Default::default()
     };
     eframe::run_native(
         "NR2003 Track Toolkit",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| {
+            let mut app = App::new();
+            // `track-toolkit.exe <track.ptf|.dat> [--3d]` opens straight into the Track tab.
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if let Some(file) = args.iter().find(|a| {
+                let l = a.to_ascii_lowercase();
+                l.ends_with(".ptf") || l.ends_with(".dat")
+            }) {
+                app.tab = Tab::Track;
+                let piece = args
+                    .iter()
+                    .position(|a| a == "--piece")
+                    .and_then(|k| args.get(k + 1))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| n.checked_sub(1));
+                app.track_view.open_path(&cc.egui_ctx, PathBuf::from(file), args.iter().any(|a| a == "--3d"), piece);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -64,6 +85,7 @@ struct App {
     show_tool_output: bool,
     tab: Tab,
     textures: textures_ui::TexturesView,
+    track_view: track_ui::TrackView,
 }
 
 impl App {
@@ -98,6 +120,7 @@ impl App {
             show_tool_output: true,
             tab: Tab::Build,
             textures: textures_ui::TexturesView::default(),
+            track_view: track_ui::TrackView::default(),
         };
         app.push(
             Level::Info,
@@ -335,7 +358,7 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                for (t, label) in [(Tab::Build, "Build track"), (Tab::Textures, "Textures")] {
+                for (t, label) in [(Tab::Build, "Build track"), (Tab::Textures, "Textures"), (Tab::Track, "Look at a track")] {
                     let b = egui::Button::new(RichText::new(label).size(16.0).strong())
                         .selected(self.tab == t);
                     if ui.add(b).clicked() {
@@ -344,6 +367,8 @@ impl eframe::App for App {
                 }
             });
             ui.separator();
+            // The build bar (track, new track, Run all, Settings) isn't used by the Track tab.
+            if self.tab != Tab::Track {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Track").strong());
                 let mut pick: Option<String> = None;
@@ -403,6 +428,7 @@ impl eframe::App for App {
                     self.show_settings = !self.show_settings;
                 }
             });
+            }
             ui.add_space(4.0);
         });
 
@@ -488,6 +514,13 @@ impl eframe::App for App {
                 sandbox: &self.settings.sandbox_dir,
             };
             self.textures.show(ctx, &env);
+        } else if self.tab == Tab::Track {
+            let folders: Vec<(String, PathBuf)> = self
+                .game_tracks
+                .iter()
+                .map(|t| (t.clone(), self.settings.game_tracks().join(t)))
+                .collect();
+            self.track_view.show(ctx, &track_ui::TrackEnv { game_tracks: &folders });
         } else {
             self.build_tab(ctx, busy, &mut run);
         }

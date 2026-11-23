@@ -16,4 +16,5 @@ pub mod mip;
 pub mod runner;
 pub mod steps;
 pub mod tga;
+pub mod track;
 pub mod util;

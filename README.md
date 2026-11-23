@@ -17,6 +17,23 @@ It drives the original 2003 tools (`mklib`, `makemip`, `make3do`, `mkstalls`) an
 | 5 | Install | Copies the `.dat` to `NR2003\tracks\<name>`, backing up the old one to `_ttk_backup\` (the newest 5 are kept). Copies missing `track.ini`/`.cam`/`.sim`/`.acd`/`.lp` files from the template track and never overwrites existing ones. |
 | 6 | Stalls | Runs `mkstalls` on an LP file and replaces the `stall_N` lines in one track.ini section, keeping `stall_pace` and preserving bytes and line endings. A backup is made first. |
 
+## Look at a track (read-only, first part of the Sandbox rebuild)
+
+The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file, and shows it:
+- **Map (from above):** pan and zoom. Click a piece of track to select it.
+- **3D:** drag to turn, right-drag to move, scroll to zoom.
+- **Pieces list:** every straight and curve, with length, turn angle, radius and banking. The selected piece also shows its height, the ground across it (right to left) and its walls in plain words.
+
+`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N]` opens straight into this tab.
+
+Tracks are read by `cppuild\ptfjson.exe` (C++). It must sit next to `track-toolkit.exe`, or in `cppuild\` of a source checkout. ptfjson decodes all 11 .ptf classes (see `docs\ptf\classes.md`), and writes them back byte-identical: all 55 .ptf files tested so far round-trip exactly.
+
+```
+ptfjson read  <in.ptf> <out.json>
+ptfjson write <in.json> <out.ptf>
+ptfjson check <in.ptf>...          (re-encode and byte-compare)
+```
+
 ## Where things are stored
 
 - **Settings:** `%APPDATA%\TrackToolkit\settings.json`. Holds the Sandbox folder, the NR2003 folder, the workspace folder and the template track.
@@ -54,3 +71,6 @@ ttk settings | tracks
 cargo build --release
 cargo test
 ```
+
+The C++ part (`ptfjson`, `ptfcheck`) builds with CMake and Ninja from a VS developer prompt:
+`cmake -S cpp -B cppuild -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build cppuild`
