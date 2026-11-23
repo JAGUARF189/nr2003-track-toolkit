@@ -1,0 +1,23 @@
+# Build output
+/target/
+/cpp/build/
+__pycache__/
+*.pyc
+
+# Generated / packaged
+/blender/nr2003_pas.zip
+/re/out/
+
+# Test data (game file copies, unpacked dats, screenshots) — large and regenerable
+/_test/
+
+# Game assets never belong in the repo
+*.dat
+*.mip
+*.stp
+*.3do
+*.ptf
+*.tga
+
+# Personal project notes live in the private notes repo
+/docs/HANDOFF.md
