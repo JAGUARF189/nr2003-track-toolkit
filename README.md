@@ -131,7 +131,7 @@ ptfjson check <in.ptf>...          (re-encode and byte-compare)
   - Every test saves and reads the file back.
 - **Real clicks:** `re\gui_shot.ps1` refuses to send input if the PC was used in the last minute, or if anything but the toolkit is in front.
 
-## Assetto Corsa tracks (converting to NR2003, phases 1-2 of 5)
+## Assetto Corsa tracks (converting to NR2003, phases 1-3 of 5)
 
 The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views, with its textures.
 - **Finding tracks:** it finds AC through Steam's library list, or you can pick the `content\tracks` folder yourself.
@@ -156,15 +156,23 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - **Centerline:** the middle between the track edges stored with AC's AI line, smoothed.
     - **Shape:** a continuous fit of the direction around the lap gives exact straights and arcs. Least squares then adjusts every arc so the lap stays within 0.3 m of AC and closes exactly.
     - **Height:** road heights come from AC's driving-surface meshes. Pieces are split wherever NR2003's per-piece height curve or width can't follow.
-    - **Ground and walls (for now):** plain asphalt, grass and a wall each side, copied from the template track (hillside), with the texture coordinates re-scaled. The grass stops halfway to any other stretch of the track, so parallel stretches never overlap.
+    - **Ground and walls (phase 3):** the ground is read across every piece from AC's driving surfaces, at its start, middle and end in 25 cm steps.
+      - **Surfaces:** road, kerbs, grass, sand/gravel and concrete/pit become NR2003 strips with the matching surface (rumble strip, sand, grass…), so cars feel the right thing. Pieces are split where the layout changes along them.
+      - **AC's game-wide surfaces:** the list in `system\data\surfaces.ini` (ROAD, GRASS, KERB, SAND) is included.
+      - **Walls:** AC's walls become NR2003 walls at the same place and height. A safety wall goes at the edge of the ground only where AC has none.
+      - **Unreadable ground** before a wall becomes grass, or concrete on tracks without grass.
+      - **Textures** come from a template track, Watkins Glen by default (any installed track can be chosen), with texture coordinates re-scaled.
+      - **Overlap and joins:** the ground stops halfway to any other stretch of the track, so parallel stretches never overlap, and neighbouring pieces meet within 5 cm.
+      - **Fallback:** where AC's ground can't be read, the piece gets plain asphalt and grass.
   - **Results:**
-    - Mugello: 190 pieces, within 0.22 m of AC (0.04 m on average), road height within 0.09 m.
-    - Monaco F1 2026: 257 pieces, within 0.11 m.
+    - Mugello: 404 pieces, within 0.22 m of AC (0.04 m on average), road height within 0.09 m. AC ground on every piece, 614 walls from AC, 241 kerb and 305 gravel strips.
+    - Monaco F1 2026: 283 pieces, within 0.11 m.
     - Both pass the checker, and each takes about 1 s.
   - **After converting:** **Look at it** opens the result in the Look at a track tab, and an orange line shows it over the AC track. To try it in NR2003, use Build track with the same name.
-  - **Command line:** `cargo run --release --example acconvert -- <AC folder> <layout|-> <template folder> <out folder> <name>`. `examples\acplot.rs` draws a top-down comparison picture.
+  - **Command line:** `cargo run --release --example acconvert -- <AC folder> <layout|-> <template folder> <out folder> <name>`.
+    - `examples\acplot.rs` draws a top-down comparison picture.
+    - `examples\acprobe.rs` lists AC's surfaces across the road.
 - **Next phases:**
-  3. Ground strips (kerbs, grass, sand, run-off) and walls from AC's surfaces.
   4. Scenery and textures as `.3do`/`.mip`.
   5. AI lines, cameras and pit stalls.
 
