@@ -31,7 +31,9 @@ fn martinsville_is_half_a_mile_and_banked() {
     // Martinsville's turns are banked about 12 degrees, higher on the outside (right)
     let max_bank = t.segments.iter().map(|s| s.banking(0.5)).fold(f64::MIN, f64::max);
     assert!(max_bank > 10.0 && max_bank < 14.0, "max banking {max_bank}");
-    let m = mesh::build(&t, true, true);
+    let m = mesh::build(&t, true);
+    let o = mesh::objects(&t, m.origin, |_| mesh::OBJECT_COLOR);
+    assert!(o.len() >= t.objects.len() * 30 * mesh::VERTEX_FLOATS);
     assert!(m.verts.len() > 10_000 * mesh::VERTEX_FLOATS);
     assert!(m.verts.iter().all(|v| v.is_finite()));
 }

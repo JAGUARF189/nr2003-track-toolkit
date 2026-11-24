@@ -9,6 +9,7 @@ use super::*;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant, SystemTime};
 use ttk::config::Settings;
+use ttk::track::objects::{self, NodeEdit};
 use ttk::track::save;
 
 pub(super) struct EditStep {
@@ -19,11 +20,27 @@ pub(super) struct EditStep {
     pub at: Instant,
     /// (object id, field, old value, new value)
     pub changes: Vec<(i32, String, Value, Value)>,
+    /// Whole objects added, removed or replaced (adding and deleting placed objects).
+    pub nodes: Vec<NodeEdit>,
+    /// Only placed objects change: refresh just those, not the whole track.
+    pub objects_only: bool,
 }
 
 impl EditStep {
     pub fn new(label: &str, key: &str, changes: Vec<(i32, String, Value, Value)>) -> Self {
-        Self { label: label.to_string(), key: key.to_string(), at: Instant::now(), changes }
+        Self {
+            label: label.to_string(),
+            key: key.to_string(),
+            at: Instant::now(),
+            changes,
+            nodes: Vec::new(),
+            objects_only: false,
+        }
+    }
+
+    /// A change to placed objects only.
+    pub fn objects(label: &str, key: &str, changes: Vec<(i32, String, Value, Value)>, nodes: Vec<NodeEdit>) -> Self {
+        Self { nodes, objects_only: true, ..Self::new(label, key, changes) }
     }
 }
 
@@ -167,6 +184,10 @@ impl TrackView {
     // ------------------------------------------------------------------ edits
     fn apply(&mut self, step: &EditStep, forward: bool) -> bool {
         let Some(l) = &mut self.loaded else { return false };
+        // Forward: objects first, then numbers. Backward: the reverse.
+        if forward {
+            objects::apply_nodes(&mut l.graph, &step.nodes, true);
+        }
         for (id, field, old, new) in &step.changes {
             let v = if forward { new } else { old };
             let ok = l.graph.node_mut(*id).map(|n| n.set(field, v.clone()).is_ok()).unwrap_or(false);
@@ -175,13 +196,24 @@ impl TrackView {
                 return false;
             }
         }
-        if let Ok(t) = Track::from_graph(&l.graph) {
+        if !forward {
+            objects::apply_nodes(&mut l.graph, &step.nodes, false);
+        }
+        if step.objects_only {
+            l.track.objects = model::objects_from_graph(&l.graph);
+        } else if let Ok(t) = Track::from_graph(&l.graph) {
             l.track = t;
-            let mut m = mesh::build(&l.track, self.show_walls, self.show_objects);
+            let mut m = mesh::build(&l.track, self.show_walls);
             self.scene.lock().unwrap().pending = Some(std::mem::take(&mut m.verts));
             l.mesh = m;
         }
-        self.recheck();
+        // Forget selected objects that no longer exist (an Undo of adding them).
+        let ids: std::collections::HashSet<i32> = l.track.objects.iter().map(|o| o.id).collect();
+        self.obj_sel.retain(|id| ids.contains(id));
+        self.objects_dirty = true;
+        if !step.objects_only {
+            self.recheck();
+        }
         if !self.dirty() {
             self.ed.clock = Instant::now();
         }
@@ -190,7 +222,7 @@ impl TrackView {
     }
 
     pub(super) fn edit(&mut self, step: EditStep) {
-        if step.changes.iter().all(|c| c.2 == c.3) {
+        if step.nodes.is_empty() && step.changes.iter().all(|c| c.2 == c.3) {
             return;
         }
         if !self.apply(&step, true) {
@@ -198,7 +230,8 @@ impl TrackView {
         }
         self.ed.redo.clear();
         if let Some(top) = self.ed.undo.last_mut() {
-            if !step.key.is_empty() && top.key == step.key && top.at.elapsed() < MERGE_WINDOW {
+            let plain = step.nodes.is_empty() && top.nodes.is_empty();
+            if plain && !step.key.is_empty() && top.key == step.key && top.at.elapsed() < MERGE_WINDOW {
                 // Same number still being dragged/typed: one Undo step, keeping the first old values.
                 for (id, field, old, new) in step.changes {
                     match top.changes.iter_mut().find(|c| c.0 == id && c.1 == field) {
@@ -322,8 +355,10 @@ impl TrackView {
                     self.ed.saved_generation = job.generation;
                     if let Some(l) = &mut self.loaded {
                         l.save_path = Some(saved.path.clone());
+                        l.folder = saved.path.parent().map(Path::to_path_buf);
                         l.source = saved.path.display().to_string();
                     }
+                    self.save_locks();
                     format!("{what} to {}", saved.path.display())
                 };
                 self.ed.last_saved = Some((now, msg));

@@ -158,6 +158,63 @@ impl Graph {
         None
     }
 
+    /// An id no object uses yet.
+    pub fn next_id(&self) -> i32 {
+        self.nodes.keys().copied().max().unwrap_or(0) + 1
+    }
+
+    /// The same track numbered the way the writer numbers it: objects in the order they are
+    /// written (depth first, following object fields in order from the root), one counter
+    /// shared with the class ids, and objects nothing refers to left out. A file read back
+    /// from disk is already in this form, so after objects are added or removed this is what
+    /// it should be compared with.
+    pub fn canonical(&self) -> Graph {
+        struct Walk<'a> {
+            g: &'a Graph,
+            map: HashMap<i32, i32>,
+            order: Vec<i32>,
+            classes: std::collections::HashSet<&'a str>,
+            counter: i32,
+        }
+        impl<'a> Walk<'a> {
+            fn visit(&mut self, id: i32) {
+                if id == 0 || self.map.contains_key(&id) {
+                    return;
+                }
+                let Some(n) = self.g.nodes.get(&id) else { return };
+                self.map.insert(id, self.counter);
+                self.counter += 1;
+                if self.classes.insert(n.class.as_str()) {
+                    self.counter += 1;
+                }
+                self.order.push(id);
+                for f in &n.fields {
+                    if f.1 == "obj" {
+                        if let Some(c) = f.2.as_i64() {
+                            self.visit(c as i32);
+                        }
+                    }
+                }
+            }
+        }
+        let mut w = Walk { g: self, map: HashMap::new(), order: Vec::new(), classes: Default::default(), counter: 1 };
+        w.visit(self.root);
+        let mut nodes = HashMap::with_capacity(w.order.len());
+        for id in &w.order {
+            let mut n = self.nodes[id].clone();
+            n.id = w.map[id];
+            for f in &mut n.fields {
+                if f.1 == "obj" {
+                    if let Some(c) = f.2.as_i64().filter(|&c| c != 0) {
+                        f.2 = Value::from(w.map.get(&(c as i32)).copied().unwrap_or(0));
+                    }
+                }
+            }
+            nodes.insert(n.id, n);
+        }
+        Graph { root: w.map.get(&self.root).copied().unwrap_or(1), trailer: self.trailer.clone(), nodes }
+    }
+
     pub fn root(&self) -> &Node {
         &self.nodes[&self.root]
     }

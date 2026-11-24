@@ -143,20 +143,24 @@ impl Track {
         if segments.is_empty() {
             bail!("the track has no segments");
         }
-        let objects = g
-            .list(root, "tsoref", root.i("tsoref_count"))
-            .into_iter()
-            .map(|r| Placed {
-                id: r.id,
-                x: r.f("x"),
-                y: r.f("y"),
-                z: r.f("z"),
-                heading: r.f("rot1"),
-                file: g.child(r, "tso").and_then(|t| t.s("file")).unwrap_or("").to_string(),
-            })
-            .collect();
+        let objects = objects_from_graph(g);
         let length = segments.iter().map(|s| s.length).sum();
         Ok(Self { night: root.i("night") != 0, segments, objects, length })
+    }
+
+    /// Ground height under a world point: from the piece of track it is beside (the nearest
+    /// one it lies across), flat beyond the last cross-section point.
+    pub fn ground_at(&self, x: f64, y: f64) -> f64 {
+        let mut best: Option<(f64, usize, f64, f64)> = None;
+        for (k, s) in self.segments.iter().enumerate() {
+            let (t, d) = s.locate(x, y);
+            let beyond = (-t).max(t - 1.0).max(0.0) * s.length.max(1.0);
+            let score = d.abs() + beyond;
+            if best.map_or(true, |b| score < b.0) {
+                best = Some((score, k, t.clamp(0.0, 1.0), d));
+            }
+        }
+        best.map_or(0.0, |(_, k, t, d)| self.segments[k].height(t, d))
     }
 
     /// Bounding box of the centerline and objects: (min x, min y, max x, max y).
@@ -197,6 +201,28 @@ impl Segment {
             self.start[2] + self.angle * t
         } else {
             (self.end[1] - self.start[1]).atan2(self.end[0] - self.start[0])
+        }
+    }
+
+    /// Where a world point is relative to this piece: (t along it, dlat to the left).
+    /// `t` is outside 0..1 for points before or after the piece.
+    pub fn locate(&self, x: f64, y: f64) -> (f64, f64) {
+        if self.curve {
+            let side = self.angle.signum();
+            let h0 = self.start[2];
+            let l0 = [-h0.sin(), h0.cos()];
+            let c = [self.start[0] + side * self.radius * l0[0], self.start[1] + side * self.radius * l0[1]];
+            let a0 = [self.start[0] - c[0], self.start[1] - c[1]];
+            let v = [x - c[0], y - c[1]];
+            let r = v[0].hypot(v[1]);
+            let phi = (a0[0] * v[1] - a0[1] * v[0]).atan2(a0[0] * v[0] + a0[1] * v[1]);
+            (phi / self.angle, side * (self.radius - r))
+        } else {
+            let (dx, dy) = (self.end[0] - self.start[0], self.end[1] - self.start[1]);
+            let len = dx.hypot(dy).max(1e-9);
+            let (ux, uy) = (dx / len, dy / len);
+            let (px, py) = (x - self.start[0], y - self.start[1]);
+            ((px * ux + py * uy) / len, px * -uy + py * ux)
         }
     }
 
@@ -295,6 +321,22 @@ impl Segment {
         }
         out
     }
+}
+
+/// The placed objects (TSO references) of a track, in file order.
+pub fn objects_from_graph(g: &Graph) -> Vec<Placed> {
+    let root = g.root();
+    g.list(root, "tsoref", root.i("tsoref_count"))
+        .into_iter()
+        .map(|r| Placed {
+            id: r.id,
+            x: r.f("x"),
+            y: r.f("y"),
+            z: r.f("z"),
+            heading: r.f("rot1"),
+            file: g.child(r, "tso").and_then(|t| t.s("file")).unwrap_or("").to_string(),
+        })
+        .collect()
 }
 
 pub fn height_in(p: &[(f64, f64)], dlat: f64) -> f64 {

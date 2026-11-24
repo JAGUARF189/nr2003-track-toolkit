@@ -35,7 +35,8 @@ pub fn save_json(json: &str, dest: &Path) -> Result<Saved> {
     let written = (|| -> Result<()> {
         write_ptf_json(json, &tmp)?;
         let back = read_ptf_file(&tmp).context("reading the new file back")?;
-        let want = Graph::from_json(json)?;
+        // Compare in the writer's numbering, so added and removed objects still match.
+        let want = Graph::from_json(json)?.canonical();
         if let Some(d) = want.difference(&back) {
             bail!("the new file didn't match the track ({d})");
         }

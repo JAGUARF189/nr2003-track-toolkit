@@ -1,5 +1,6 @@
-//! Triangles for the track viewer: ground strips coloured by surface, walls as boxes and
-//! placed objects as markers. One interleaved vertex buffer, `VERTEX_FLOATS` per vertex:
+//! Triangles for the track viewer: ground strips coloured by surface and walls as boxes
+//! ([`build`]), and placed objects as markers ([`objects`], a separate layer so selecting or
+//! moving objects doesn't rebuild the track). One interleaved vertex buffer, `VERTEX_FLOATS` per vertex:
 //! position (3, metres from `origin`, z up), colour (3), normal (3), segment index (1, -1 = none).
 
 use super::model::{Segment, Track};
@@ -44,7 +45,9 @@ pub fn wall_color(t: i64) -> [f32; 3] {
     }
 }
 
-const OBJECT_COLOR: [f32; 3] = [1.0, 0.78, 0.15];
+pub const OBJECT_COLOR: [f32; 3] = [1.0, 0.78, 0.15];
+pub const OBJECT_SELECTED: [f32; 3] = [1.0, 0.42, 0.10];
+pub const OBJECT_LOCKED: [f32; 3] = [0.55, 0.55, 0.58];
 
 struct Builder {
     verts: Vec<f32>,
@@ -97,7 +100,7 @@ fn at(s: &Segment, t: f64, dlat: f64, z: f64) -> [f64; 3] {
     [p[0], p[1], z]
 }
 
-pub fn build(track: &Track, show_walls: bool, show_objects: bool) -> TrackMesh {
+pub fn build(track: &Track, show_walls: bool) -> TrackMesh {
     let b = track.bounds();
     let mut zmin = f64::MAX;
     let mut zmax = f64::MIN;
@@ -200,22 +203,27 @@ pub fn build(track: &Track, show_walls: bool, show_objects: bool) -> TrackMesh {
         }
     }
 
-    if show_objects {
-        for o in &track.objects {
-            let (h, half) = (3.0, 1.0);
-            let (c, sn) = (o.heading.cos(), o.heading.sin());
-            let corner = |dx: f64, dy: f64, z: f64| [o.x + dx * c - dy * sn, o.y + dx * sn + dy * c, z];
-            let z0 = o.z;
-            let z1 = o.z + h;
-            let bot = [corner(-half, -half, z0), corner(half, -half, z0), corner(half, half, z0), corner(-half, half, z0)];
-            let top = [corner(-half, -half, z1), corner(half, -half, z1), corner(half, half, z1), corner(-half, half, z1)];
-            m.quad(top[0], top[1], top[2], top[3], OBJECT_COLOR, -1.0);
-            for k in 0..4 {
-                let j = (k + 1) % 4;
-                m.quad(bot[k], bot[j], top[j], top[k], OBJECT_COLOR, -1.0);
-            }
+    TrackMesh { verts: m.verts, origin, centerlines, extent: [b[2] - b[0], b[3] - b[1], zmin, zmax] }
+}
+
+/// Markers for the placed objects (2 m boxes, 3 m tall), coloured by `color(index)`, in the
+/// same coordinates as the track mesh made with `origin`.
+pub fn objects(track: &Track, origin: [f64; 3], color: impl Fn(usize) -> [f32; 3]) -> Vec<f32> {
+    let mut m = Builder { verts: Vec::with_capacity(track.objects.len() * 30 * VERTEX_FLOATS), origin };
+    for (k, o) in track.objects.iter().enumerate() {
+        let col = color(k);
+        let (h, half) = (3.0, 1.0);
+        let (c, sn) = (o.heading.cos(), o.heading.sin());
+        let corner = |dx: f64, dy: f64, z: f64| [o.x + dx * c - dy * sn, o.y + dx * sn + dy * c, z];
+        let z0 = o.z;
+        let z1 = o.z + h;
+        let bot = [corner(-half, -half, z0), corner(half, -half, z0), corner(half, half, z0), corner(-half, half, z0)];
+        let top = [corner(-half, -half, z1), corner(half, -half, z1), corner(half, half, z1), corner(-half, half, z1)];
+        m.quad(top[0], top[1], top[2], top[3], col, -1.0);
+        for k in 0..4 {
+            let j = (k + 1) % 4;
+            m.quad(bot[k], bot[j], top[j], top[k], col, -1.0);
         }
     }
-
-    TrackMesh { verts: m.verts, origin, centerlines, extent: [b[2] - b[0], b[3] - b[1], zmin, zmax] }
+    m.verts
 }

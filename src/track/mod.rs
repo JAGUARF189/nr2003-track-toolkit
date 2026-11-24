@@ -6,4 +6,5 @@ pub mod edit;
 pub mod graph;
 pub mod mesh;
 pub mod model;
+pub mod objects;
 pub mod save;

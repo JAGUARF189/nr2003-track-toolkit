@@ -1,14 +1,17 @@
 //! "Track" tab: open a track (.ptf, or the one inside a .dat) and look at it, from above or
-//! in 3D, with every piece of track listed in plain numbers. Read-only for now.
+//! in 3D, with every piece of track listed in plain numbers; edit its shape (editor.rs) and
+//! its placed objects (objects_ui.rs); save safely (saving.rs).
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use ttk::config::Settings;
 
 mod editor;
+mod objects_ui;
 mod saving;
 
 use ttk::track::check::Problem;
@@ -29,6 +32,13 @@ enum View {
     ThreeD,
 }
 
+/// What clicking on the map works on.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Pieces,
+    Objects,
+}
+
 struct Loaded {
     name: String,
     source: String,
@@ -41,6 +51,8 @@ struct Loaded {
     restored: bool,
     /// Textures/objects the track uses that can't be found (checked once when loading).
     file_problems: Vec<Problem>,
+    /// The track's folder (where its textures and objects are): where added objects are copied.
+    folder: Option<PathBuf>,
 }
 
 struct Camera {
@@ -87,6 +99,22 @@ pub struct TrackView {
     edit_error: Option<String>,
     /// The shape changed since loading (AI lines, cameras and stalls need redoing).
     layout_changed: bool,
+    mode: Mode,
+    /// Selected placed objects (graph ids), in the order picked.
+    obj_sel: Vec<i32>,
+    /// Locked objects can't be picked on the map.
+    locked: HashSet<i32>,
+    obj_drag: Option<objects_ui::Drag>,
+    obj_filter: String,
+    /// Last click on the map in Objects mode, to step through objects on top of each other.
+    obj_cycle: Option<(egui::Pos2, Vec<i32>, usize)>,
+    obj_note: Option<String>,
+    /// Scroll the object list to the selection on the next frame.
+    obj_scroll: bool,
+    /// Counter that makes each drag on the map its own Undo step.
+    obj_key: u64,
+    /// The object markers need redrawing (moved, selected, locked...).
+    objects_dirty: bool,
     scene: Arc<Mutex<Scene>>,
 }
 
@@ -112,6 +140,16 @@ impl Default for TrackView {
             move_objects: true,
             edit_error: None,
             layout_changed: false,
+            mode: Mode::Pieces,
+            obj_sel: Vec::new(),
+            locked: HashSet::new(),
+            obj_drag: None,
+            obj_filter: String::new(),
+            obj_cycle: None,
+            obj_note: None,
+            obj_scroll: false,
+            obj_key: 0,
+            objects_dirty: true,
             scene: Arc::new(Mutex::new(Scene::default())),
         }
     }
@@ -121,7 +159,7 @@ impl TrackView {
     /// Load a track in the background. `restore_to`: `path` is an earlier version of that file.
     fn open(&mut self, ctx: &egui::Context, name: String, path: PathBuf, restore_to: Option<PathBuf>) {
         let (tx, rx) = mpsc::channel();
-        let (walls, objects) = (self.show_walls, self.show_objects);
+        let walls = self.show_walls;
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
             let r = (|| -> anyhow::Result<Loaded> {
@@ -133,7 +171,7 @@ impl TrackView {
                 };
                 let g = graph::parse_ptf(&bytes)?;
                 let track = Track::from_graph(&g)?;
-                let mesh = mesh::build(&track, walls, objects);
+                let mesh = mesh::build(&track, walls);
                 let restored = restore_to.is_some();
                 let save_path = restore_to.or_else(|| {
                     (ttk::util::ext_lower(&path) == "ptf").then(|| path.clone())
@@ -142,16 +180,12 @@ impl TrackView {
                     source = format!("earlier version: {source}");
                 }
                 // Look for the textures and objects next to the real track file.
-                let file_problems = save_path
-                    .as_ref()
-                    .or(Some(&path))
-                    .and_then(|p| p.parent())
-                    .map(|dir| {
-                        let shared = dir.parent().map(|t| t.join("shared")).filter(|d| d.is_dir());
-                        ttk::track::check::missing_files(&g, dir, shared.as_deref())
-                    })
+                let folder = save_path.as_ref().or(Some(&path)).and_then(|p| p.parent()).map(Path::to_path_buf);
+                let file_problems = folder
+                    .as_deref()
+                    .map(|dir| ttk::track::check::missing_files(&g, dir, shared_folder(dir).as_deref()))
                     .unwrap_or_default();
-                Ok(Loaded { name, source, graph: g, track, mesh, save_path, restored, file_problems })
+                Ok(Loaded { name, source, graph: g, track, mesh, save_path, restored, file_problems, folder })
             })();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
@@ -171,6 +205,11 @@ impl TrackView {
         self.open(ctx, name, path, None);
     }
 
+    /// Start in Objects mode (command line `--objects`).
+    pub fn objects_mode(&mut self) {
+        self.mode = Mode::Objects;
+    }
+
     fn poll(&mut self) {
         let Some(rx) = &self.loading else { return };
         match rx.try_recv() {
@@ -178,6 +217,12 @@ impl TrackView {
                 self.scene.lock().unwrap().pending = Some(std::mem::take(&mut l.mesh.verts));
                 self.selected = None;
                 let restored = l.restored;
+                self.locked = l.save_path.as_deref().map(|p| ttk::track::objects::load_locks(p, &l.track)).unwrap_or_default();
+                self.obj_sel.clear();
+                self.obj_drag = None;
+                self.obj_cycle = None;
+                self.obj_note = None;
+                self.objects_dirty = true;
                 self.loaded = Some(l);
                 self.reset_edits(restored);
                 self.layout_changed = false;
@@ -200,10 +245,11 @@ impl TrackView {
 
     fn rebuild_mesh(&mut self) {
         if let Some(l) = &mut self.loaded {
-            let mut m = mesh::build(&l.track, self.show_walls, self.show_objects);
+            let mut m = mesh::build(&l.track, self.show_walls);
             self.scene.lock().unwrap().pending = Some(std::mem::take(&mut m.verts));
             l.mesh = m;
         }
+        self.objects_dirty = true;
     }
 
     fn fit(&mut self) {
@@ -236,6 +282,9 @@ impl TrackView {
         self.workspace = Some(env.workspace.to_path_buf());
         if self.loaded.is_some() && self.ed.pending.is_none() {
             self.shortcuts(ctx);
+            if self.mode == Mode::Objects {
+                self.objects_keys(ctx);
+            }
         }
         egui::SidePanel::left("track_side").resizable(true).default_width(370.0).show(ctx, |ui| {
             self.side_panel(ui, ctx, env, settings);
@@ -343,6 +392,23 @@ impl TrackView {
             self.rebuild_mesh();
         }
 
+        ui.horizontal(|ui| {
+            ui.label("Work on");
+            for (m, label) in [(Mode::Pieces, "Track pieces"), (Mode::Objects, "Objects")] {
+                let b = egui::Button::new(RichText::new(label).size(15.0).strong()).selected(self.mode == m);
+                if ui.add(b).clicked() && self.mode != m {
+                    self.mode = m;
+                    self.obj_drag = None;
+                    self.objects_dirty = true;
+                }
+            }
+        });
+        if self.mode == Mode::Objects {
+            ui.separator();
+            self.objects_panel(ui);
+            return;
+        }
+
         // The selected piece: edit its shape and banking
         if let Some(k) = self.selected {
             if self.loaded.as_ref().is_some_and(|l| k < l.track.segments.len()) {
@@ -400,6 +466,14 @@ impl TrackView {
                 self.focus_segment(k);
             }
         }
+        if self.mode == Mode::Objects && self.view == View::Map {
+            self.objects_map_input(ui, rect, &resp);
+        }
+        if self.objects_dirty {
+            self.objects_dirty = false;
+            let verts = self.object_verts();
+            self.scene.lock().unwrap().pending_objects = Some(verts);
+        }
         let Some(l) = &self.loaded else {
             painter.text(
                 rect.center(),
@@ -419,7 +493,13 @@ impl TrackView {
         match self.view {
             View::Map => {
                 let mpp = 2.0 * self.cam.half_h / rect.height() as f64; // metres per pixel
-                if resp.dragged() {
+                // In Objects mode the left button picks and moves objects; pan with the right or middle.
+                let pan = if self.mode == Mode::Objects {
+                    resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle)
+                } else {
+                    resp.dragged()
+                };
+                if pan {
                     self.cam.cx -= dx * mpp;
                     self.cam.cy += dy * mpp;
                 }
@@ -434,7 +514,7 @@ impl TrackView {
                     }
                     self.cam.half_h = (self.cam.half_h * f).clamp(2.0, 50_000.0);
                 }
-                if resp.clicked() {
+                if resp.clicked() && self.mode == Mode::Pieces {
                     if let Some(p) = resp.interact_pointer_pos() {
                         let wx = self.cam.cx + (p.x - rect.center().x) as f64 * mpp + l.mesh.origin[0];
                         let wy = self.cam.cy - (p.y - rect.center().y) as f64 * mpp + l.mesh.origin[1];
@@ -509,12 +589,25 @@ impl TrackView {
                 }
             }
         }
-        let hint = match self.view {
-            View::Map => "Drag to move  ·  Scroll to zoom  ·  Click a piece of track to select it",
-            View::ThreeD => "Drag to turn  ·  Right-drag to move  ·  Scroll to zoom",
+        if self.view == View::Map && self.show_objects {
+            self.objects_overlay(&painter, rect);
+        }
+        let hint = match (self.view, self.mode) {
+            (View::Map, Mode::Pieces) => "Drag to move  ·  Scroll to zoom  ·  Click a piece of track to select it",
+            (View::Map, Mode::Objects) => {
+                "Click an object to select it (click again for the one under it)  ·  Ctrl+click adds  ·  Drag a box around several\n\
+                 Drag them to move  ·  Drag the round handle to turn  ·  Right-drag to move the map  ·  Scroll to zoom"
+            }
+            (View::ThreeD, Mode::Pieces) => "Drag to turn  ·  Right-drag to move  ·  Scroll to zoom",
+            (View::ThreeD, Mode::Objects) => "Drag to turn  ·  Right-drag to move  ·  Scroll to zoom  ·  Pick objects on the Map view",
         };
         painter.text(rect.left_top() + egui::vec2(10.0, 8.0), egui::Align2::LEFT_TOP, hint, font, Color32::from_gray(230));
     }
+}
+
+/// The game's `tracks\shared` folder next to a track folder, if there is one.
+fn shared_folder(track_dir: &Path) -> Option<PathBuf> {
+    track_dir.parent().map(|t| t.join("shared")).filter(|d| d.is_dir())
 }
 
 fn piece_line(s: &model::Segment) -> String {
@@ -631,18 +724,22 @@ fn norm(a: [f64; 3]) -> [f64; 3] {
 }
 
 // ------------------------------------------------------------------ OpenGL
+/// Two layers drawn with the same program: the track, and the object markers (rebuilt on
+/// their own when objects move or the selection changes).
 #[derive(Default)]
 struct Scene {
     gl: Option<GlObjects>,
     failed: bool,
     pending: Option<Vec<f32>>,
+    pending_objects: Option<Vec<f32>>,
     count: i32,
+    count_objects: i32,
 }
 
 struct GlObjects {
     program: glow::Program,
-    vao: glow::VertexArray,
-    vbo: glow::Buffer,
+    /// (vertex array, buffer) for the track, then the objects
+    layers: [(glow::VertexArray, glow::Buffer); 2],
 }
 
 const VS: &str = r#"
@@ -707,20 +804,24 @@ impl Scene {
                 gl.detach_shader(program, sh);
                 gl.delete_shader(sh);
             }
-            let vao = gl.create_vertex_array()?;
-            let vbo = gl.create_buffer()?;
-            gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            let stride = (VERTEX_FLOATS * 4) as i32;
-            for (name, size, offset) in [("a_pos", 3, 0), ("a_col", 3, 3), ("a_nrm", 3, 6), ("a_seg", 1, 9)] {
-                if let Some(loc) = gl.get_attrib_location(program, name) {
-                    gl.enable_vertex_attrib_array(loc);
-                    gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, offset * 4);
+            let layer = || -> Result<(glow::VertexArray, glow::Buffer), String> {
+                let vao = gl.create_vertex_array()?;
+                let vbo = gl.create_buffer()?;
+                gl.bind_vertex_array(Some(vao));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+                let stride = (VERTEX_FLOATS * 4) as i32;
+                for (name, size, offset) in [("a_pos", 3, 0), ("a_col", 3, 3), ("a_nrm", 3, 6), ("a_seg", 1, 9)] {
+                    if let Some(loc) = gl.get_attrib_location(program, name) {
+                        gl.enable_vertex_attrib_array(loc);
+                        gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, offset * 4);
+                    }
                 }
-            }
-            gl.bind_vertex_array(None);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            Ok(GlObjects { program, vao, vbo })
+                gl.bind_vertex_array(None);
+                gl.bind_buffer(glow::ARRAY_BUFFER, None);
+                Ok((vao, vbo))
+            };
+            let layers = [layer()?, layer()?];
+            Ok(GlObjects { program, layers })
         }
     }
 
@@ -740,20 +841,26 @@ impl Scene {
         }
         let o = self.gl.as_ref().unwrap();
         unsafe {
-            if let Some(v) = self.pending.take() {
-                let bytes = std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4);
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(o.vbo));
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
-                gl.bind_buffer(glow::ARRAY_BUFFER, None);
-                self.count = (v.len() / VERTEX_FLOATS) as i32;
+            for (k, pending) in [self.pending.take(), self.pending_objects.take()].into_iter().enumerate() {
+                if let Some(v) = pending {
+                    let bytes = std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4);
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(o.layers[k].1));
+                    gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+                    gl.bind_buffer(glow::ARRAY_BUFFER, None);
+                    let n = (v.len() / VERTEX_FLOATS) as i32;
+                    if k == 0 {
+                        self.count = n;
+                    } else {
+                        self.count_objects = n;
+                    }
+                }
             }
-            if self.count == 0 {
+            if self.count == 0 && self.count_objects == 0 {
                 return;
             }
             gl.use_program(Some(o.program));
             gl.uniform_matrix_4_f32_slice(gl.get_uniform_location(o.program, "u_mvp").as_ref(), false, mvp);
             gl.uniform_1_f32(gl.get_uniform_location(o.program, "u_sel").as_ref(), sel);
-            gl.bind_vertex_array(Some(o.vao));
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LEQUAL);
             gl.depth_mask(true);
@@ -761,7 +868,12 @@ impl Scene {
             gl.clear(glow::DEPTH_BUFFER_BIT);
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
-            gl.draw_arrays(glow::TRIANGLES, 0, self.count);
+            for (k, n) in [self.count, self.count_objects].into_iter().enumerate() {
+                if n > 0 {
+                    gl.bind_vertex_array(Some(o.layers[k].0));
+                    gl.draw_arrays(glow::TRIANGLES, 0, n);
+                }
+            }
             gl.disable(glow::DEPTH_TEST);
             gl.enable(glow::BLEND);
             gl.bind_vertex_array(None);

@@ -17,14 +17,14 @@ It drives the original 2003 tools (`mklib`, `makemip`, `make3do`, `mkstalls`) an
 | 5 | Install | Copies the `.dat` to `NR2003\tracks\<name>`, backing up the old one to `_ttk_backup\` (the newest 5 are kept). Copies missing `track.ini`/`.cam`/`.sim`/`.acd`/`.lp` files from the template track and never overwrites existing ones. |
 | 6 | Stalls | Runs `mkstalls` on an LP file and replaces the `stall_N` lines in one track.ini section, keeping `stall_pace` and preserving bytes and line endings. A backup is made first. |
 
-## Look at a track (read-only, first part of the Sandbox rebuild)
+## Look at a track (the Sandbox rebuild)
 
 The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file, and shows it:
 - **Map (from above):** pan and zoom. Click a piece of track to select it.
 - **3D:** drag to turn, right-drag to move, scroll to zoom.
 - **Pieces list:** every straight and curve, with length, turn angle, radius and banking. The selected piece also shows its height, the ground across it (right to left) and its walls in plain words.
 
-`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N]` opens straight into this tab.
+`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N] [--objects]` opens straight into this tab.
 
 ### Editing the shape (phase 3)
 
@@ -49,9 +49,32 @@ Select a piece (in the list or on the map) to edit it:
   - Texture/object files that can't be found.
 - **Calibration:** all 47 installed game tracks give no "won't load" findings.
 
+### Objects (phase 4)
+
+Click **Work on: Objects**. Every placed object shows as a dot on the map.
+- **Picking objects (map view):**
+  - Click one to select it. Click the same spot again to get the one underneath.
+  - Ctrl+click adds or removes one. Drag a box around several.
+  - Click empty ground, or press Esc, to select nothing.
+- **Moving and turning:**
+  - Drag selected objects to move them.
+  - Drag the round blue handle to turn them about their middle.
+  - Right-drag moves the map. Each drag is one Undo step.
+- **Add objects…** picks `.3do` files and places them in a row in the middle of the view, sitting on the ground.
+  - A file not already in the track folder is copied in, along with the textures and models it names (found by reading the `.3do`).
+  - A file already in the track folder is never overwritten. If a texture can't be found, the tab says so.
+- **Make a copy** (Ctrl+D) copies the selection 5 m along. **Delete** (Delete key) removes it. Object files nothing uses any more are dropped from the track.
+- **Lock / Unlock:** locked objects show grey and can't be picked on the map, so they can't be moved or deleted by accident.
+  - Unlock them from the list.
+  - Locks are kept next to the track in `<track>.ptf.ttk.json`; the game ignores it.
+- **Put on the ground** sets each selected object's height to the ground under it.
+- **One object selected:** type its position, height and direction.
+- **The list** shows every object. Search it by name; click one to jump to it.
+- **Saving:** the save check compares in the file's own numbering, so adding and deleting objects saves safely. Tested by saving, reading back and comparing.
+
 ### Saving and autosave
 
-- **Save / Save as… / Undo / Redo** (Ctrl+S, Ctrl+Z, Ctrl+Y). For now the one change you can make is **Lighting: Day / Night**. Editing the track itself is phase 3.
+- **Save / Save as… / Undo / Redo** (Ctrl+S, Ctrl+Z, Ctrl+Y). Undo covers lighting, shape edits and object edits.
 - **Every save is checked before it counts.** The new file is written as `<name>.ptf.saving` and read back. Only if it matches does the old file go to `_ttk_backup\` (the newest 20 are kept), and then the new file takes its place. A failed save never touches your track.
 - **Autosave** runs only when there are unsaved changes. It defaults to **every 5 minutes**; set any time from 10 seconds to a week, in seconds, minutes or hours. The setting is stored in `settings.json` (`autosave`, `autosave_secs`).
   - The countdown starts at your first unsaved change and restarts after every save.
