@@ -933,6 +933,8 @@ pub struct Report {
     pub crashes: Vec<String>,
     /// Subtracted from AC's x, y to centre the NR2003 track (add it back to compare).
     pub offset: [f64; 2],
+    /// Subtracted from AC's heights (the road's lowest point becomes 0).
+    pub height_base: f64,
     /// Gap the fit left at the start/finish line, spread round the lap when writing (metres).
     pub closing_gap_m: f64,
     /// AI points whose track edges were missing from AC's file and were measured or filled in.
@@ -1526,6 +1528,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     prof.hl = smooth_closed(&prof.hl, 2);
     // the road's lowest point becomes height 0
     let base = prof.hc.iter().chain(&prof.hr).chain(&prof.hl).fold(f64::MAX, |a, &b| a.min(b));
+    report.height_base = base;
     for v in prof.hc.iter_mut().chain(prof.hr.iter_mut()).chain(prof.hl.iter_mut()) {
         *v -= base;
     }

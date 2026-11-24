@@ -10,6 +10,7 @@
 
 pub mod ac;
 pub mod acconv;
+pub mod acscenery;
 pub mod config;
 pub mod dat;
 pub mod inifile;

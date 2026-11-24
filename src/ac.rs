@@ -84,6 +84,25 @@ pub fn export_scene(dir: &Path, layout: &str, out: &Path, tex_side: u32) -> Resu
     Ok(err.lines().filter(|l| !l.starts_with("warning")).last().unwrap_or("").to_string())
 }
 
+/// [`export_scene`] with every texture written to its own file in `tex_dir` instead (see
+/// `acdump`: `<index>.rgba` / `<index>.enc`), at most `tex_side` pixels; the scene keeps only names.
+pub fn export_scene_textures(dir: &Path, layout: &str, out: &Path, tex_side: u32, tex_dir: &Path) -> Result<String> {
+    let layout = if layout.is_empty() { "-" } else { layout };
+    let side = tex_side.max(1).to_string();
+    let args: Vec<&std::ffi::OsStr> = vec![
+        "scene".as_ref(),
+        dir.as_os_str(),
+        layout.as_ref(),
+        out.as_os_str(),
+        "--tex".as_ref(),
+        side.as_ref(),
+        "--tex-dir".as_ref(),
+        tex_dir.as_os_str(),
+    ];
+    let (_, err) = run(&args)?;
+    Ok(err.lines().filter(|l| !l.starts_with("warning")).last().unwrap_or("").to_string())
+}
+
 /// The AC `content\tracks` folder: from Steam's library list, else the usual places.
 pub fn find_tracks_dir() -> Option<PathBuf> {
     let tail = Path::new("steamapps").join("common").join("assettocorsa").join("content").join("tracks");

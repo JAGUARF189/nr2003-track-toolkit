@@ -1,7 +1,11 @@
 // acdump: read an Assetto Corsa track folder for the Track Toolkit.
 //
 //   acdump info  <track folder>                         JSON: layouts, models, surfaces, AI line
-//   acdump scene <track folder> <layout|-> <out> [--tex N] [--no-tex]
+//   acdump scene <track folder> <layout|-> <out> [--tex N] [--no-tex] [--tex-dir <folder>]
+//
+// --tex-dir: each texture goes to <folder>\<index>.rgba (u32 w, u32 h, RGBA) or <index>.enc (a
+// PNG/JPEG as stored), and the scene keeps only its name (w = h = 0, len 0). Big tracks'
+// textures then never sit in memory together.
 //
 // `scene` writes everything the 3D view needs to <out> (little endian; str = u32 length + bytes;
 // positions converted to the Track Toolkit's axes: x, y = -AC z, z = AC y, metres):
@@ -19,7 +23,10 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <map>
 #include <string>
 #include <vector>
@@ -106,7 +113,20 @@ int info(const std::string& dir) {
     return 0;
 }
 
-int scene(const std::string& dir, const std::string& layoutName, const std::string& outPath, std::uint32_t texSide) {
+void writeTexFile(const std::string& texDir, int index, const dds::Image& img, const std::vector<std::uint8_t>& encoded) {
+    const std::filesystem::path p = std::filesystem::path(texDir) / (std::to_string(index) + (encoded.empty() ? ".rgba" : ".enc"));
+    std::ofstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("can't write " + p.string());
+    if (encoded.empty()) {
+        const std::uint32_t wh[2] = {img.width, img.height};
+        f.write(reinterpret_cast<const char*>(wh), 8);
+        f.write(reinterpret_cast<const char*>(img.rgba.data()), std::streamsize(img.rgba.size()));
+    } else {
+        f.write(reinterpret_cast<const char*>(encoded.data()), std::streamsize(encoded.size()));
+    }
+}
+
+int scene(const std::string& dir, const std::string& layoutName, const std::string& outPath, std::uint32_t texSide, const std::string& texDir) {
     const ac::TrackFolder t = ac::scan(dir);
     const ac::Layout* layout = nullptr;
     for (const auto& l : t.layouts)
@@ -169,6 +189,11 @@ int scene(const std::string& dir, const std::string& layoutName, const std::stri
                     }
                     ti = int(textures.size());
                     texIndex[key] = ti;
+                    if (!texDir.empty()) {
+                        if (nt.img.width || !nt.encoded.empty()) writeTexFile(texDir, ti, nt.img, nt.encoded);
+                        nt.img = {};
+                        nt.encoded.clear();
+                    }
                     textures.push_back(std::move(nt));
                 }
             }
@@ -271,13 +296,16 @@ int main(int argc, char** argv) {
         if (a.size() >= 2 && a[0] == "info") return info(a[1]);
         if (a.size() >= 4 && a[0] == "scene") {
             std::uint32_t side = 256;
+            std::string texDir;
             for (std::size_t k = 4; k < a.size(); ++k) {
                 if (a[k] == "--no-tex") side = 0;
                 if (a[k] == "--tex" && k + 1 < a.size()) side = std::uint32_t(std::stoul(a[++k]));
+                if (a[k] == "--tex-dir" && k + 1 < a.size()) texDir = a[++k];
             }
-            return scene(a[1], a[2], a[3], side);
+            if (!texDir.empty()) std::filesystem::create_directories(texDir);
+            return scene(a[1], a[2], a[3], side, texDir);
         }
-        std::cerr << "usage: acdump info <track folder>\n       acdump scene <track folder> <layout|-> <out> [--tex N] [--no-tex]\n";
+        std::cerr << "usage: acdump info <track folder>\n       acdump scene <track folder> <layout|-> <out> [--tex N] [--no-tex] [--tex-dir <folder>]\n";
         return 2;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";

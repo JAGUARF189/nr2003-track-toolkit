@@ -105,6 +105,23 @@ fn make_an_nr2003_track_from_mugello() {
     assert!(ptf.is_file(), "saved to the workspace");
     assert!(ws.join("mugello_ac").join("trackmat").is_dir(), "textures copied");
     assert!(made.line.len() > 100, "the NR2003 line to draw over the AC track");
+    // "Bring AC's scenery" is on by default: objects and textures made and placed in the track
+    let sc = made.scenery.as_ref().expect("scenery was asked for");
+    if h.settings.sandbox_dir.join("make3do.exe").is_file() {
+        assert!(sc.problems.is_empty(), "{:?}", sc.problems);
+        assert!(sc.objects > 100 && sc.mips > 20, "{} objects, {} textures", sc.objects, sc.mips);
+        let dir = ws.join("mugello_ac");
+        let count = |ext: &str| std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == ext)).count();
+        assert_eq!(count("3do"), sc.objects);
+        assert!(count("mip") >= sc.mips);
+        let g = ttk::track::graph::read_ptf_file(&ptf).unwrap();
+        let t = ttk::track::model::Track::from_graph(&g).unwrap();
+        assert_eq!(t.objects.iter().filter(|o| o.file.starts_with("sc_")).count(), sc.objects, "placed in the track");
+        assert!(!dir.join("_ttk_scenery").exists(), "work files cleaned up");
+    } else {
+        eprintln!("make3do isn't installed here: only the scenery's failure message is checked");
+        assert!(!sc.problems.is_empty());
+    }
 
     h.click("Look at it");
     assert_eq!(h.view.take_open_request(), Some(ptf));

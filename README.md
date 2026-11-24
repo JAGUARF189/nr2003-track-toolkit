@@ -131,7 +131,7 @@ ptfjson check <in.ptf>...          (re-encode and byte-compare)
   - Every test saves and reads the file back.
 - **Real clicks:** `re\gui_shot.ps1` refuses to send input if the PC was used in the last minute, or if anything but the toolkit is in front.
 
-## Assetto Corsa tracks (converting to NR2003, phases 1-3 of 5)
+## Assetto Corsa tracks (converting to NR2003, phases 1-4 of 5)
 
 The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views, with its textures.
 - **Finding tracks:** it finds AC through Steam's library list, or you can pick the `content\tracks` folder yourself.
@@ -176,12 +176,26 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - turns tighter than the road is wide (the inside is clipped)
     - an endless loop
   - **Point-to-point roads** can't be converted (NR2003 tracks are loops), and the converter says so.
+  - **Open-world maps** are refused too: layouts over 40 km round, or needing over 3000 pieces.
+- **Scenery (phase 4):** tick **Bring AC's scenery** (on by default) and AC's buildings, stands, trees, fences and the land beyond the road come along as NR2003 objects with AC's own textures. It needs Papyrus's `make3do` and `makemip` (the Sandbox folder in Settings).
+  - **What's left out:**
+    - the track itself (AC's driving surfaces and walls; NR2003 makes its own);
+    - AC's 3D grass tufts (NR2003's grass ground stands in for them);
+    - triangles lying on NR2003's own ground (AC's visual road, kerb and grass layers).
+  - **Objects:** the rest is cut into 150 m map squares, one `.3do` each (`sc_<x>_<y>.3do`), placed once at the square's centre.
+    - Big things stop being drawn beyond 800 m, and small things (under 8 m across: cones, people, chairs) beyond 300 m. NR2003's detail slider scales both.
+    - Shapes are split below make3do's limits (16,536 vertices and 32,767 faces per shape, measured).
+  - **Textures:** each AC texture becomes `ac_<name>.mip` (DXT, tiling, up to 256/512/1024 px, your choice).
+    - Opaque materials lose their alpha (AC keeps other data there).
+    - Cut-outs (trees, fences) get hard edges and are seen from both sides.
+  - **Results:** about 20 s for Mugello (231 objects, 1.2 million triangles, 64 textures, 84 MB) and 30 s for Monaco 2020 (406 objects, 1.1 million triangles, 295 textures, 108 MB). Installed mod tracks' `.dat` files run up to 440 MB.
+  - **Checked:** `tests\ac_scenery.rs` checks that the scenery's land meets NR2003's ground: median step 0.20 m at Mugello and 0.14 m at Monaco. It also checks the limits and the PAS text.
+  - **Not tried in NR2003 yet:** brightness (materials use 0.8 like the Blender exporter) and face direction should be checked in Sandbox or the game. The 3D view here shows placed objects as boxes.
+  - **Command line:** `cargo run --release --example acscenery -- <AC folder> <layout|-> <template folder> <out folder> <name> [--tex N] [--keep-pas]`. `--keep-pas` keeps make3do's input for editing in Blender. `examples\mip2png.rs` shows `.mip` files as pictures.
   - **Command line:** `cargo run --release --example acconvert -- <AC folder> <layout|-> <template folder> <out folder> <name>`.
     - `examples\acplot.rs` draws a top-down comparison picture.
     - `examples\acprobe.rs` lists AC's surfaces across the road.
-- **Next phases:**
-  4. Scenery and textures as `.3do`/`.mip`.
-  5. AI lines, cameras and pit stalls.
+- **Next phase:** 5. AI lines, cameras and pit stalls.
 
 ## Where things are stored
 

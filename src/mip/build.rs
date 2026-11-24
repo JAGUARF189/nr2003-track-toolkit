@@ -163,10 +163,21 @@ pub fn build(
     recipe: &Recipe,
     work: &Path,
 ) -> Result<Built> {
-    let mut notes = Vec::new();
     let img = image::open(picture)
         .with_context(|| format!("can't open {} as a picture", util::file_name(picture)))?
         .to_rgba8();
+    build_image(sandbox_dir, img, target, recipe, work)
+}
+
+/// [`build`] from a picture already in memory (for converters).
+pub fn build_image(
+    sandbox_dir: &Path,
+    img: image::RgbaImage,
+    target: &Path,
+    recipe: &Recipe,
+    work: &Path,
+) -> Result<Built> {
+    let mut notes = Vec::new();
     let source_alpha = Transparency::of(&img);
     match (recipe.original_kind, source_alpha) {
         (Some(4 | 5 | 7 | 11), Transparency::None) => notes.push(

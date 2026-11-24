@@ -8,7 +8,7 @@ use eframe::egui_glow;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use ttk::ac::{self, AcInfo, AcScene, ViewOptions};
-use ttk::acconv;
+use ttk::{acconv, acscenery};
 use ttk::config::Settings;
 use ttk::track::mesh::TrackMesh;
 
@@ -25,10 +25,20 @@ struct Loaded {
     layout: String,
 }
 
+/// What became of AC's scenery.
+struct SceneryMade {
+    stats: acscenery::Stats,
+    objects: usize,
+    mips: usize,
+    problems: Vec<String>,
+}
+
 /// A finished conversion.
 struct Made {
     report: acconv::Report,
     written: acconv::Written,
+    /// None when scenery wasn't asked for.
+    scenery: Option<SceneryMade>,
     /// The NR2003 centerline in AC coordinates, to draw over the AC track.
     line: Vec<[f32; 3]>,
 }
@@ -62,6 +72,11 @@ pub struct AcView {
     show_nr: bool,
     /// Convert with a looser fit (fewer pieces).
     fewer: bool,
+    /// Bring AC's scenery as NR2003 objects, with textures up to `scenery_tex` pixels.
+    scenery: bool,
+    scenery_tex: u32,
+    /// What the conversion is doing now (shown by the spinner).
+    stage: Arc<Mutex<String>>,
     /// A track file for the Track tab to open (after "Look at it").
     open_request: Option<PathBuf>,
 }
@@ -94,6 +109,9 @@ impl Default for AcView {
             make_error: None,
             show_nr: true,
             fewer: false,
+            scenery: true,
+            scenery_tex: 512,
+            stage: Arc::new(Mutex::new(String::new())),
             open_request: None,
         }
     }
@@ -181,21 +199,54 @@ impl AcView {
         let template_dir = ac_template_dir(settings);
         let out = settings.workspace_dir.join(&name);
         let options = if self.fewer { acconv::Options::fewer_pieces() } else { acconv::Options::default() };
+        let scenery = self.scenery;
+        let sopt = acscenery::Options { tex_side: self.scenery_tex, ..Default::default() };
+        let sandbox = settings.sandbox_dir.clone();
+        let stage = self.stage.clone();
+        *stage.lock().unwrap() = "Reading the AC track…".into();
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
+            let say = |m: &str| {
+                *stage.lock().unwrap() = m.to_string();
+                ctx2.request_repaint();
+            };
+            let tex_dir = std::env::temp_dir().join(format!("ttk_actex_{}", std::process::id()));
             let r = (|| -> anyhow::Result<Made> {
                 let tpl_file = ttk::track::graph::track_file_in(&template_dir)
                     .ok_or_else(|| anyhow::anyhow!("the template track ({}) has no .ptf or .dat", template_dir.display()))?;
                 let (bytes, _) = ttk::track::graph::load_ptf_bytes(&tpl_file)?;
                 let template = ttk::track::graph::parse_ptf(&bytes)?;
                 let tmp = std::env::temp_dir().join(format!("ttk_acconv_{}.acscene", std::process::id()));
-                ac::export_scene(&dir, &layout, &tmp, 0)?;
+                let _ = std::fs::remove_dir_all(&tex_dir);
+                if scenery {
+                    say("Reading the AC track and its textures…");
+                    ac::export_scene_textures(&dir, &layout, &tmp, 1024, &tex_dir)?;
+                } else {
+                    ac::export_scene(&dir, &layout, &tmp, 0)?;
+                }
                 let scene = AcScene::read(&tmp, 0);
                 let _ = std::fs::remove_file(&tmp);
-                let c = acconv::convert(&scene?, &template, &options)?;
-                let written = acconv::write_track(&c, &out, &name, &template_dir)?;
+                let scene = scene?;
+                say("Fitting the track…");
+                let mut c = acconv::convert(&scene, &template, &options)?;
                 let t = ttk::track::model::Track::from_graph(&c.graph)?;
+                let scenery_made = if scenery {
+                    say("Sorting AC's scenery into objects…");
+                    let plan = acscenery::plan(&scene, &t, c.report.offset, c.report.height_base, &sopt);
+                    let stats = plan.stats.clone();
+                    match acscenery::build(&plan, &tex_dir, &out, &sandbox, &sopt, &|m| say(m)) {
+                        Ok(built) => {
+                            let objects = acscenery::place(&mut c.graph, &built)?;
+                            Some(SceneryMade { stats, objects, mips: built.mips, problems: built.problems })
+                        }
+                        Err(e) => Some(SceneryMade { stats, objects: 0, mips: 0, problems: vec![format!("{e:#}")] }),
+                    }
+                } else {
+                    None
+                };
+                say("Saving…");
+                let written = acconv::write_track(&c, &out, &name, &template_dir)?;
                 let off = c.report.offset;
                 let mut line = Vec::new();
                 for s in &t.segments {
@@ -205,8 +256,9 @@ impl AcView {
                         line.push([(p[0] + off[0]) as f32, (p[1] + off[1]) as f32, 0.0]);
                     }
                 }
-                Ok(Made { report: c.report, written, line })
+                Ok(Made { report: c.report, written, scenery: scenery_made, line })
             })();
+            let _ = std::fs::remove_dir_all(&tex_dir);
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
         });
@@ -278,8 +330,24 @@ impl AcView {
             ui.label(RichText::new("A track with this name is already there. It's backed up before it's replaced.").color(Color32::from_rgb(240, 190, 80)));
         }
         ui.checkbox(&mut self.fewer, "Fewer pieces").on_hover_text(
-            "Follows AC a little less closely (within 0.6 m instead of 0.3 m) for far fewer pieces.              Try it if a big track has more pieces than NR2003 likes.",
+            "Follows AC a little less closely (within 0.6 m instead of 0.3 m) for far fewer pieces. Try it if a big track has more pieces than NR2003 likes.",
         );
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.scenery, "Bring AC's scenery").on_hover_text(
+                "Buildings, stands, trees, fences and the land beyond the road become NR2003 objects, with AC's textures. \
+                 Needs Papyrus's make3do and makemip (the Sandbox folder in Settings).",
+            );
+            ui.add_enabled_ui(self.scenery, |ui| {
+                ui.label("textures up to");
+                egui::ComboBox::from_id_salt("ac_scenery_tex").selected_text(format!("{} px", self.scenery_tex)).width(80.0).show_ui(ui, |ui| {
+                    for side in [256u32, 512, 1024] {
+                        ui.selectable_value(&mut self.scenery_tex, side, format!("{side} px"));
+                    }
+                })
+                .response
+                .on_hover_text("Bigger is sharper but uses more of the graphics card's memory. 512 suits most tracks.");
+            });
+        });
         let go = egui::Button::new(RichText::new("Make NR2003 track").size(15.0).strong());
         if ui.add_enabled(self.making.is_none() && !self.nr_name.trim().is_empty(), go).clicked() {
             self.make_track(ctx, settings);
@@ -287,7 +355,7 @@ impl AcView {
         if self.making.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Fitting the track…");
+                ui.label(self.stage.lock().unwrap().clone());
             });
         }
         if let Some(e) = &self.make_error {
@@ -331,6 +399,22 @@ impl AcView {
             ui.label("Walls");
             ui.label(format!("{} where AC has walls, {} at the edge of the ground", r.ac_walls, r.safety_walls));
             ui.end_row();
+            if let Some(sc) = &m.scenery {
+                ui.label("Scenery");
+                ui.label(format!(
+                    "{} objects from {} AC models ({:.2} million triangles), {} textures",
+                    sc.objects,
+                    sc.stats.meshes,
+                    sc.stats.triangles as f64 / 1e6,
+                    sc.mips
+                ))
+                .on_hover_text(format!(
+                    "Left out: {} AC models that are the track itself (NR2003 makes its own road and walls), \
+                     {} of AC's 3D grass, {} hidden ones, and {} triangles lying on NR2003's own ground.",
+                    sc.stats.meshes_track, sc.stats.meshes_grass, sc.stats.meshes_hidden, sc.stats.on_ground
+                ));
+                ui.end_row();
+            }
             if r.warnings > 0 {
                 ui.label("Warnings");
                 ui.label(format!("{} (see Check in Look at a track)", r.warnings));
@@ -341,7 +425,7 @@ impl AcView {
             ui.colored_label(
                 Color32::from_rgb(240, 190, 80),
                 format!(
-                    "This track has {} pieces. The most in any track you have installed is 660 (Circuit Of The Americas),                      so NR2003 hasn't been seen handling this many. If it won't load, make it again with Fewer pieces.",
+                    "This track has {} pieces. The most in any track you have installed is 660 (Circuit Of The Americas), so NR2003 hasn't been seen handling this many. If it won't load, make it again with Fewer pieces.",
                     r.pieces
                 ),
             );
@@ -353,6 +437,14 @@ impl AcView {
             )).weak());
         }
         ui.label(RichText::new(format!("Saved {}", m.written.ptf.display())).weak());
+        if let Some(sc) = &m.scenery {
+            for p in sc.problems.iter().take(4) {
+                ui.colored_label(Color32::from_rgb(240, 190, 80), format!("Scenery: {p}"));
+            }
+            if sc.problems.len() > 4 {
+                ui.colored_label(Color32::from_rgb(240, 190, 80), format!("…and {} more scenery problems", sc.problems.len() - 4));
+            }
+        }
         if !m.written.missing.is_empty() {
             ui.colored_label(Color32::from_rgb(240, 190, 80), format!("Textures not found in the template: {}", m.written.missing.join(", ")));
         }
@@ -365,8 +457,8 @@ impl AcView {
         ui.label(
             RichText::new(
                 "The ground (road, kerbs, grass, sand) and walls follow AC's; their textures come from the track above. \
-                 AC's own textures and scenery, the AI lines and pit stalls come in the next phases. \
-                 To try it in NR2003, use Build track with this name.",
+                 With Bring AC's scenery, AC's buildings, trees and land come along with their own textures. \
+                 The AI lines and pit stalls come in the next phase. To try it in NR2003, use Build track with this name.",
             )
             .weak(),
         );
