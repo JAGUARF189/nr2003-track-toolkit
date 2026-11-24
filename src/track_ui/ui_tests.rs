@@ -332,3 +332,44 @@ fn clicking_the_map_picks_the_wall_or_ground_there() {
     let id = parts::pick_part(s, p[0], p[1], 0.05).unwrap();
     assert!(s.fs.iter().any(|f| f.id == id && (0.5 * (f.dlat[0] + f.dlat[1]) - a).abs() < 1e-6));
 }
+
+#[test]
+fn replace_a_texture_everywhere() {
+    let Some((mut h, file)) = Harness::open_copy("replace", 2, None) else { return };
+    let s = h.track().segments[1].clone();
+    let (a, b, surf) = s.strips(0.5)[0];
+    h.click(&format!("{} {:.1} m", surface_name(surf), b - a));
+    let strip = h.view.part.expect("strip picked");
+    let users = |h: &Harness, f: &str| ttk::track::surface::faces_using(&h.view.loaded.as_ref().unwrap().graph, f).len();
+    let tex = |h: &Harness| h.track().segments[1].fs.iter().find(|x| x.id == strip).and_then(|x| x.tex.clone()).unwrap().file;
+    let old = tex(&h);
+    let n_old = users(&h, &old);
+    assert!(n_old > 1, "{old} is used on {n_old} faces");
+
+    h.open_combo("Replace everywhere");
+    let other = h
+        .widgets
+        .iter()
+        .filter(|w| w.role == Role::Button)
+        .filter(|w| w.label.as_deref().is_some_and(|l| l.to_ascii_lowercase().starts_with("trackmat\\") && !l.eq_ignore_ascii_case(&old)))
+        .min_by(|a, b| a.rect.top().total_cmp(&b.rect.top()))
+        .and_then(|w| w.label.clone())
+        .expect("another texture in the list");
+    let n_other = users(&h, &other);
+    h.click(&other);
+    assert_eq!(users(&h, &old), 0, "nothing shows {old} any more");
+    assert_eq!(users(&h, &other), n_other + n_old);
+    assert_eq!(tex(&h), other);
+    assert!(h.view.part_note.as_deref().is_some_and(|n| n.contains(&n_old.to_string())), "{:?}", h.view.part_note);
+
+    // one Undo puts every face back
+    h.click("Undo");
+    assert_eq!(users(&h, &old), n_old);
+    assert_eq!(users(&h, &other), n_other);
+
+    // and it saves
+    h.click("Redo");
+    h.save();
+    let (g, _) = reload(&file);
+    assert_eq!(ttk::track::surface::faces_using(&g, &old).len(), 0);
+}

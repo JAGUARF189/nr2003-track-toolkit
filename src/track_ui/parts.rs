@@ -399,32 +399,75 @@ impl TrackView {
                 }
             });
         });
+        // Replace everywhere: the same swap on every strip and wall showing this texture
+        let mut replace: Option<i32> = None;
+        let mut replace_other = false;
+        let everywhere = if names.len() == 1 { surface::faces_using(&l.graph, &names[0]) } else { Vec::new() };
+        if !everywhere.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Replace everywhere").on_hover_text(format!(
+                    "Swaps {} for another texture on all {} strips and wall sides that use it, in one step (Undo puts it back).",
+                    names[0],
+                    everywhere.len()
+                ));
+                egui::ComboBox::from_id_salt(("part_replace", id)).selected_text("with…").width(220.0).height(360.0).show_ui(ui, |ui| {
+                    for (tid, file) in &textures {
+                        if file.eq_ignore_ascii_case(&names[0]) {
+                            continue;
+                        }
+                        if ui.selectable_label(false, file).clicked() {
+                            replace = Some(*tid);
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(false, "Another .mip file…").clicked() {
+                        replace_other = true;
+                    }
+                });
+            });
+        }
         if let Some(t) = chosen {
             self.part_changes("Change texture", "", surface::set_texture(&apps, t), Vec::new());
         }
         if other {
             self.pick_texture_file(&apps);
         }
+        if let Some(t) = replace {
+            self.part_changes("Replace a texture everywhere", "", surface::set_texture(&everywhere, t), Vec::new());
+            self.part_note = Some(format!("Replaced {} on {} strips and wall sides.", names[0], everywhere.len()));
+        }
+        if replace_other && self.pick_texture_file(&everywhere) {
+            let n = format!("Replaced {} on {} strips and wall sides.", names[0], everywhere.len());
+            self.part_note = Some(match self.part_note.take() {
+                Some(t) => format!("{n} {t}"),
+                None => n,
+            });
+        }
     }
 
-    fn pick_texture_file(&mut self, apps: &[i32]) {
-        let Some(l) = &self.loaded else { return };
+    /// Pick a .mip file for faces `apps`. True if they were changed.
+    fn pick_texture_file(&mut self, apps: &[i32]) -> bool {
+        let Some(l) = &self.loaded else { return false };
         let Some(folder) = l.folder.clone() else {
             self.edit_error = Some("Save the track first, so there's a folder for the texture.".into());
-            return;
+            return false;
         };
         let start = if folder.join("trackmat").is_dir() { folder.join("trackmat") } else { folder.clone() };
         let Some(file) = rfd::FileDialog::new().set_title("Pick a texture (.mip)").add_filter("Texture", &["mip"]).set_directory(start).pick_file() else {
-            return;
+            return false;
         };
         match surface::bring_in_texture(&file, &folder) {
             Ok((name, note)) => {
-                let Some(l) = &self.loaded else { return };
+                let Some(l) = &self.loaded else { return false };
                 let (node, tex) = surface::texture_for_file(&l.graph, &name);
                 self.part_changes("Change texture", "", surface::set_texture(apps, tex), node.into_iter().collect());
                 self.part_note = note.map(|n| format!("Texture: {n}."));
+                true
             }
-            Err(e) => self.edit_error = Some(format!("{e:#}")),
+            Err(e) => {
+                self.edit_error = Some(format!("{e:#}"));
+                false
+            }
         }
     }
 

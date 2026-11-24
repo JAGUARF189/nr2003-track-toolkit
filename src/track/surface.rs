@@ -314,6 +314,21 @@ pub fn wall_width(g: &Graph, id: i32, w0: f64, w1: f64) -> Vec<Change> {
 }
 
 /// Point appearances at texture `tex`.
+/// Every strip and wall face in the track showing `file` (any case): their appearance ids.
+pub fn faces_using(g: &Graph, file: &str) -> Vec<i32> {
+    let mut apps: Vec<i32> = g
+        .nodes
+        .values()
+        .filter(|n| n.class == "F_SectionDescriptor" || n.class == "W_SectionDescriptor")
+        .flat_map(|n| textured_faces(g, n.id))
+        .map(|(_, app)| app)
+        .filter(|&app| texture_of(g, app).is_some_and(|(_, f)| f.eq_ignore_ascii_case(file)))
+        .collect();
+    apps.sort_unstable();
+    apps.dedup();
+    apps
+}
+
 pub fn set_texture(apps: &[i32], tex: i32) -> Vec<Change> {
     apps.iter().map(|&a| Change { id: a, field: "tex[0]".into(), value: json!(tex) }).collect()
 }
