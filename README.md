@@ -119,6 +119,18 @@ ptfjson write <in.json> <out.ptf>
 ptfjson check <in.ptf>...          (re-encode and byte-compare)
 ```
 
+### Testing the editors without a mouse
+
+`cargo test --release --bin track-toolkit` runs the Track tab's real panels in memory (`src\track_ui\ui_tests.rs`).
+- **How it works:** widgets are found by name through egui's accessibility tree, and clicks and typing are fed in as input events. No window opens and no real input is sent, so it's safe while someone is using the PC.
+- **What it covers:**
+  - Shape editor: typing a length, Undo, picking from the piece list, typing banking and radius.
+  - Wall editor: type, height, add and delete.
+  - Strip editor: pick, surface, split and remove, texture, copy to the next piece.
+  - Map picking of walls and strips.
+  - Every test saves and reads the file back.
+- **Real clicks:** `re\gui_shot.ps1` refuses to send input if the PC was used in the last minute, or if anything but the toolkit is in front.
+
 ## Where things are stored
 
 - **Settings:** `%APPDATA%\TrackToolkit\settings.json`. Holds the Sandbox folder, the NR2003 folder, the workspace folder and the template track.

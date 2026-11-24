@@ -43,13 +43,18 @@ fn lerp2(a: [f64; 2], t: f64) -> f64 {
 pub(super) fn pick_part(s: &model::Segment, x: f64, y: f64, slack: f64) -> Option<i32> {
     let (t, d) = s.locate(x, y);
     let t = t.clamp(0.0, 1.0);
+    // Walls under the point (or within `slack`); where walls overlap (a thin fence standing in a
+    // thicker wall), the one whose middle is nearest wins.
     let wall = s
         .ws
         .iter()
-        .map(|w| ((d - lerp2(w.dlat, t)).abs() - 0.5 * lerp2(w.width, t), w.id))
-        .filter(|(gap, _)| *gap <= slack)
-        .min_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, id)) = wall {
+        .map(|w| {
+            let off = (d - lerp2(w.dlat, t)).abs();
+            ((off - 0.5 * lerp2(w.width, t)).max(0.0), off, w.id)
+        })
+        .filter(|(gap, _, _)| *gap <= slack)
+        .min_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
+    if let Some((_, _, id)) = wall {
         return Some(id);
     }
     if d > s.max_dlat(t) + slack || d < s.min_dlat(t) - slack {

@@ -17,11 +17,19 @@ public class W {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, int f, int e);
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO i);
+  public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
   public struct RECT { public int L, T, R, B; }
   public struct POINT { public int X, Y; }
 }
 '@
 [W]::SetProcessDPIAware() | Out-Null
+# Someone used the mouse or keyboard in the last minute: they're at the PC, so send nothing.
+if ($Clicks) {
+  $li = New-Object W+LASTINPUTINFO; $li.cbSize = 8; [W]::GetLastInputInfo([ref]$li) | Out-Null
+  $idle = ([Environment]::TickCount - [int]$li.dwTime) / 1000
+  if ($idle -lt 60) { "ABORT: the PC was used $([int]$idle) s ago. No input sent."; exit 1 }
+}
 $psi = New-Object System.Diagnostics.ProcessStartInfo "C:\Papyrus\TrackToolkit\target\release\track-toolkit.exe"
 $psi.Arguments = $AppArgs
 $psi.UseShellExecute = $false
@@ -29,7 +37,14 @@ $psi.EnvironmentVariables["APPDATA"] = "$e\appdata"
 $p = [System.Diagnostics.Process]::Start($psi)
 Start-Sleep -Seconds $Wait
 $p.Refresh(); $h = $p.MainWindowHandle
-[W]::SetForegroundWindow($h) | Out-Null; Start-Sleep -Milliseconds 500
+# Windows only lets the app in front hand over focus; a tap of Alt (key down + up, no other
+# key) lifts that lock so the toolkit can come to the front. Retry a few times.
+for ($try = 0; $try -lt 5; $try++) {
+  [W]::keybd_event(0x12, 0, 0, 0); [W]::keybd_event(0x12, 0, 2, 0)
+  [W]::SetForegroundWindow($h) | Out-Null; Start-Sleep -Milliseconds 400
+  $fg = [uint32]0; $null = [W]::GetWindowThreadProcessId([W]::GetForegroundWindow(), [ref]$fg)
+  if ($fg -eq $p.Id) { break }
+}
 # Steps: "x,y" = click (client coordinates, physical pixels), "k:text" = type keys (SendKeys syntax),
 # "w:ms" = wait, "s:file.png" = screenshot now, "d:x1,y1,x2,y2" = left-drag, "r:x1,y1,x2,y2" = right-drag,
 # "c:x,y" = Ctrl+click.

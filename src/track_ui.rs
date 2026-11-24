@@ -14,6 +14,8 @@ mod editor;
 mod objects_ui;
 mod parts;
 mod saving;
+#[cfg(test)]
+mod ui_tests;
 
 use ttk::track::check::Problem;
 use ttk::track::mesh::{self, Batch, TrackMesh, VERTEX_FLOATS};

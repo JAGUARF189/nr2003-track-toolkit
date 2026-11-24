@@ -155,6 +155,18 @@ fn clock_text(d: Duration) -> String {
 }
 
 impl TrackView {
+    /// Something to undo (headless UI tests).
+    #[cfg(test)]
+    pub(super) fn ed_can_undo(&self) -> bool {
+        !self.ed.undo.is_empty()
+    }
+
+    /// A save is running in the background (headless UI tests).
+    #[cfg(test)]
+    pub(super) fn saving_now(&self) -> bool {
+        self.ed.job.is_some()
+    }
+
     pub fn dirty(&self) -> bool {
         self.loaded.is_some() && self.ed.generation != self.ed.saved_generation
     }
