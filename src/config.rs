@@ -22,6 +22,8 @@ pub struct Settings {
     pub autosave_secs: u64,
     /// Assetto Corsa's `content\tracks` folder (empty: look for it).
     pub ac_tracks_dir: PathBuf,
+    /// Installed NR2003 track whose ground textures, walls and settings AC conversions copy.
+    pub ac_template: String,
 }
 
 impl Default for Settings {
@@ -35,6 +37,7 @@ impl Default for Settings {
             autosave: true,
             autosave_secs: 300,
             ac_tracks_dir: PathBuf::new(),
+            ac_template: "watkins_glen".into(),
         }
     }
 }

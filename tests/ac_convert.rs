@@ -30,6 +30,10 @@ fn convert_and_check(name: &str, layout: &str) {
         "{name}: {} pieces ({} straight, {} curved), worst {:.2} m, mean {:.3} m, length AC {:.1} / NR {:.1}, heights found {:.0}%, worst height {:.2} m, {} warnings, {:.1}s",
         r.pieces, r.straights, r.curves, r.worst_m, r.mean_m, r.length_ac, r.length_nr, r.heights_found * 100.0, r.worst_height_m, r.warnings, t0.elapsed().as_secs_f64()
     );
+    eprintln!(
+        "  AC ground on {} of {} pieces, {} AC walls, {} safety walls, strips by surface {:?}",
+        r.ac_ground_pieces, r.pieces, r.ac_walls, r.safety_walls, r.strips_by_surface
+    );
     assert!(r.crashes.is_empty(), "won't load: {:#?}", r.crashes);
     assert!(r.worst_m < 0.5, "worst {}", r.worst_m);
     assert!((r.length_nr - r.length_ac).abs() / r.length_ac < 0.005);
@@ -37,6 +41,15 @@ fn convert_and_check(name: &str, layout: &str) {
     let t = track::model::Track::from_graph(&c.graph).unwrap();
     let (a, b) = (t.segments.last().unwrap(), &t.segments[0]);
     assert!((a.end[0] - b.start[0]).hypot(a.end[1] - b.start[1]) < 0.02);
+    // the ground's outer edges agree where pieces meet
+    let mut worst_join: f64 = 0.0;
+    for k in 0..t.segments.len() {
+        let (p, q) = (&t.segments[k], &t.segments[(k + 1) % t.segments.len()]);
+        let e = (p.min_dlat(1.0) - q.min_dlat(0.0)).abs().max((p.max_dlat(1.0) - q.max_dlat(0.0)).abs());
+        worst_join = worst_join.max(e);
+    }
+    eprintln!("  worst ground-edge mismatch at a join: {worst_join:.2} m");
+    assert!(worst_join < 0.1, "ground edges step {worst_join} m at a join");
     let problems = track::check::check(&t);
     for p in problems.iter().take(10) {
         eprintln!("  {:?}: {}", p.level, p.text);

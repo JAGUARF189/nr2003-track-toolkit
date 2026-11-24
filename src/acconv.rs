@@ -36,15 +36,19 @@ pub struct Options {
     pub height_m: f64,
     /// Largest road width difference (metres).
     pub width_m: f64,
-    /// Grass beside the road on each side (metres), until phase 3 brings AC's own run-off.
+    /// Grass beside the road on each side (metres) where AC's own ground can't be read.
     pub grass_m: f64,
-    /// A wall at the outer edge of the grass on both sides.
+    /// A wall at the outer edge of the ground where AC has none, so cars can't fall off.
     pub walls: bool,
+    /// Use AC's own ground (road, kerbs, grass, sand...) and walls (phase 3).
+    pub ac_ground: bool,
+    /// How far beside the road AC's ground is followed at most (metres).
+    pub ground_m: f64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { position_m: 0.3, height_m: 0.1, width_m: 0.3, grass_m: 12.0, walls: true }
+        Self { position_m: 0.3, height_m: 0.1, width_m: 0.3, grass_m: 12.0, walls: true, ac_ground: true, ground_m: 30.0 }
     }
 }
 
@@ -558,6 +562,8 @@ pub fn room_beside(cl: &Centerline, max: f64) -> (Vec<f64>, Vec<f64>) {
 pub struct RoadHeights {
     cell: f64,
     tris: Vec<[f32; 9]>,
+    /// AC surface (index into the scene's surfaces) of each triangle.
+    surf: Vec<u16>,
     grid: HashMap<(i32, i32), Vec<u32>>,
 }
 
@@ -565,12 +571,14 @@ impl RoadHeights {
     pub fn new(s: &AcScene) -> Self {
         let cell = 4.0;
         let mut tris = Vec::new();
+        let mut surf = Vec::new();
         let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for m in &s.meshes {
             let Some(sf) = m.surface.and_then(|k| s.surfaces.get(k)) else { continue };
             if sf.key == "WALL" {
                 continue;
             }
+            let sk = m.surface.unwrap_or(0) as u16;
             for t in m.indices.chunks_exact(3) {
                 let v = |i: u32| {
                     let b = i as usize * 8;
@@ -579,6 +587,7 @@ impl RoadHeights {
                 let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
                 let id = tris.len() as u32;
                 tris.push([a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]);
+                surf.push(sk);
                 let lo = |k: usize| a[k].min(b[k]).min(c[k]) as f64;
                 let hi = |k: usize| a[k].max(b[k]).max(c[k]) as f64;
                 let (x0, x1) = ((lo(0) / cell).floor() as i32, (hi(0) / cell).floor() as i32);
@@ -593,7 +602,7 @@ impl RoadHeights {
                 }
             }
         }
-        Self { cell, tris, grid }
+        Self { cell, tris, surf, grid }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -602,8 +611,14 @@ impl RoadHeights {
 
     /// Height of the driving surface under (x, y) closest to `near`, if any.
     pub fn at(&self, x: f64, y: f64, near: f64) -> Option<f64> {
+        self.at_surface(x, y, near, 2.0).map(|h| h.0)
+    }
+
+    /// Height and AC surface (index) of the driving surface under (x, y) closest to `near`,
+    /// within `within` metres of it.
+    pub fn at_surface(&self, x: f64, y: f64, near: f64, within: f64) -> Option<(f64, usize)> {
         let key = ((x / self.cell).floor() as i32, (y / self.cell).floor() as i32);
-        let mut best: Option<f64> = None;
+        let mut best: Option<(f64, usize)> = None;
         for &id in self.grid.get(&key)? {
             let t = &self.tris[id as usize];
             let (ax, ay, az) = (t[0] as f64, t[1] as f64, t[2] as f64);
@@ -620,11 +635,132 @@ impl RoadHeights {
                 continue;
             }
             let z = l1 * az + l2 * bz + l3 * cz;
-            if best.is_none_or(|b| (z - near).abs() < (b - near).abs()) {
-                best = Some(z);
+            if best.is_none_or(|b| (z - near).abs() < (b.0 - near).abs()) {
+                best = Some((z, self.surf[id as usize] as usize));
             }
         }
-        best.filter(|z| (z - near).abs() < 2.0)
+        best.filter(|b| (b.0 - near).abs() < within)
+    }
+}
+
+/// AC's walls (meshes named <digits>WALL...), seen from above as line segments with the
+/// height of their top, for finding the wall beside the road.
+pub struct AcWalls {
+    cell: f64,
+    segs: Vec<([f64; 2], [f64; 2], f64)>,
+    grid: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl AcWalls {
+    pub fn new(s: &AcScene) -> Self {
+        let cell = 6.0;
+        let mut segs = Vec::new();
+        let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for m in &s.meshes {
+            let is_wall = m.surface.and_then(|k| s.surfaces.get(k)).is_some_and(|sf| sf.key == "WALL");
+            if !is_wall {
+                continue;
+            }
+            for t in m.indices.chunks_exact(3) {
+                let v = |i: u32| {
+                    let b = i as usize * 8;
+                    [m.verts[b] as f64, m.verts[b + 1] as f64, m.verts[b + 2] as f64]
+                };
+                let p = [v(t[0]), v(t[1]), v(t[2])];
+                // a wall triangle seen from above is (nearly) a line: its longest edge in x/y
+                let mut best = (0.0, 0, 1);
+                for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                    let d = (p[i][0] - p[j][0]).hypot(p[i][1] - p[j][1]);
+                    if d > best.0 {
+                        best = (d, i, j);
+                    }
+                }
+                if best.0 < 0.05 {
+                    continue;
+                }
+                let top = p[0][2].max(p[1][2]).max(p[2][2]);
+                let (a, b) = ([p[best.1][0], p[best.1][1]], [p[best.2][0], p[best.2][1]]);
+                let id = segs.len() as u32;
+                segs.push((a, b, top));
+                let (x0, x1) = ((a[0].min(b[0]) / cell).floor() as i32, (a[0].max(b[0]) / cell).floor() as i32);
+                let (y0, y1) = ((a[1].min(b[1]) / cell).floor() as i32, (a[1].max(b[1]) / cell).floor() as i32);
+                if (x1 - x0) > 40 || (y1 - y0) > 40 {
+                    continue;
+                }
+                for gx in x0..=x1 {
+                    for gy in y0..=y1 {
+                        grid.entry((gx, gy)).or_default().push(id);
+                    }
+                }
+            }
+        }
+        Self { cell, segs, grid }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.segs.is_empty()
+    }
+
+    /// The first wall along the ray from `p` in direction `dir` (unit), within `max` metres:
+    /// (distance, height of its top).
+    pub fn cast(&self, p: [f64; 2], dir: [f64; 2], max: f64) -> Option<(f64, f64)> {
+        let mut best: Option<(f64, f64)> = None;
+        let steps = (max / self.cell).ceil() as usize + 1;
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..=steps {
+            let q = [p[0] + dir[0] * (k as f64 * self.cell).min(max), p[1] + dir[1] * (k as f64 * self.cell).min(max)];
+            let (gx, gy) = ((q[0] / self.cell).floor() as i32, (q[1] / self.cell).floor() as i32);
+            for cx in gx - 1..=gx + 1 {
+                for cy in gy - 1..=gy + 1 {
+                    let Some(list) = self.grid.get(&(cx, cy)) else { continue };
+                    for &id in list {
+                        if !seen.insert(id) {
+                            continue;
+                        }
+                        let (a, b, top) = self.segs[id as usize];
+                        // ray p + t dir against segment a + u (b - a)
+                        let e = [b[0] - a[0], b[1] - a[1]];
+                        let den = dir[0] * e[1] - dir[1] * e[0];
+                        if den.abs() < 1e-9 {
+                            continue;
+                        }
+                        let w = [a[0] - p[0], a[1] - p[1]];
+                        let t = (w[0] * e[1] - w[1] * e[0]) / den;
+                        let u = (w[0] * dir[1] - w[1] * dir[0]) / den;
+                        if t > 0.2 && t <= max && (-1e-6..=1.0 + 1e-6).contains(&u) && best.is_none_or(|bb| t < bb.0) {
+                            best = Some((t, top));
+                        }
+                    }
+                }
+            }
+            if best.is_some_and(|bb| bb.0 < k as f64 * self.cell - self.cell) {
+                break;
+            }
+        }
+        best
+    }
+}
+
+/// NR2003 ground surface for an AC surface (by its name and whether it counts as track).
+pub fn nr_surface(key: &str, valid: bool) -> i64 {
+    let k = key.to_ascii_uppercase();
+    let has = |w: &[&str]| w.iter().any(|x| k.contains(x));
+    if has(&["KERB", "CURB", "RUMBLE"]) {
+        12
+    } else if has(&["SAND", "TRAP"]) {
+        6
+    } else if has(&["GRAVEL"]) {
+        7
+    } else if has(&["DIRT", "MUD"]) {
+        5
+    } else if has(&["GRASS", "GRS", "GREEN"]) {
+        4
+    } else if has(&["CONCRETE", "PIT", "SIDEWALK", "CEMENT"]) {
+        2
+    } else if valid {
+        1
+    } else {
+        4
     }
 }
 
@@ -650,6 +786,13 @@ pub struct Report {
     pub crashes: Vec<String>,
     /// Subtracted from AC's x, y to centre the NR2003 track (add it back to compare).
     pub offset: [f64; 2],
+    /// Pieces whose ground and walls came from AC (the rest: plain asphalt and grass).
+    pub ac_ground_pieces: usize,
+    /// Walls placed where AC has walls, and safety walls at the edge of the ground.
+    pub ac_walls: usize,
+    pub safety_walls: usize,
+    /// Ground strips by NR2003 surface number.
+    pub strips_by_surface: Vec<(i64, usize)>,
     pub warnings: usize,
 }
 
@@ -659,13 +802,32 @@ pub struct Converted {
     pub report: Report,
 }
 
-/// Template nodes to copy pieces from (found in a stock track such as hillside).
+/// Template nodes to copy pieces from (found in a stock track such as watkins_glen or hillside).
 struct Templates {
     seg: Node,
     x: Node,
     asphalt: i32,
     grass: i32,
     wall: i32,
+    /// The template strip used for each NR2003 surface (the most common textured one).
+    by_surface: HashMap<i64, i32>,
+}
+
+impl Templates {
+    /// Template strip for a surface, falling back to a similar one the template has.
+    fn strip_for(&self, surface: i64) -> i32 {
+        let order: &[i64] = match surface {
+            12 => &[12, 3, 2, 1],
+            6 => &[6, 7, 5, 3, 4],
+            7 => &[7, 6, 5, 3, 4],
+            5 => &[5, 3, 6, 4],
+            2 => &[2, 1],
+            4 => &[4, 5],
+            _ => &[1],
+        };
+        let found = order.iter().find_map(|s| self.by_surface.get(s).copied());
+        found.unwrap_or(if surface == 4 { self.grass } else { self.asphalt })
+    }
 }
 
 fn find_templates(g: &Graph) -> Result<Templates> {
@@ -706,7 +868,30 @@ fn find_templates(g: &Graph) -> Result<Templates> {
         .or_else(|| ids.iter().filter_map(|id| g.node(*id)).find(|n| n.class == "W_SectionDescriptor"))
         .context("the template has no wall")?
         .id;
-    Ok(Templates { seg, x, asphalt, grass, wall })
+    // per surface: the most common single-texture strip
+    let mut counts: HashMap<(i64, String), (usize, i32)> = HashMap::new();
+    for n in ids.iter().filter_map(|id| g.node(*id)) {
+        if n.class != "F_SectionDescriptor" || n.get("coords").is_none() {
+            continue;
+        }
+        if let Some(t) = tex_of(n) {
+            let e = counts.entry((n.i("i15"), t)).or_insert((0, n.id));
+            e.0 += 1;
+        }
+    }
+    let mut by_surface: HashMap<i64, (usize, i32)> = HashMap::new();
+    for ((surface, _), (count, id)) in counts {
+        let e = by_surface.entry(surface).or_insert((0, id));
+        if count > e.0 || (count == e.0 && id < e.1) {
+            *e = (count, id);
+        }
+    }
+    let mut by_surface: HashMap<i64, i32> = by_surface.into_iter().map(|(k, v)| (k, v.1)).collect();
+    by_surface.insert(1, asphalt);
+    if grass != asphalt {
+        by_surface.insert(4, grass);
+    }
+    Ok(Templates { seg, x, asphalt, grass, wall, by_surface })
 }
 
 fn hex_doubles(v: &[f64]) -> String {
@@ -843,6 +1028,137 @@ fn slope_at(h: &[f64], i: usize, ds: f64) -> f64 {
     (h[(i + span) % n] - h[(i + n - span) % n]) / (2.0 * span as f64 * ds)
 }
 
+// ------------------------------------------------------------------ a piece's cross-section
+
+/// Everything across one piece: cross-section points, ground strips and walls (right to left).
+struct Layout {
+    /// (dlat, height, slope) at the start and end of the piece.
+    xs: Vec<([f64; 2], [f64; 2], [f64; 2])>,
+    /// (NR2003 surface, right edge dlat at start and end). Each strip runs left to the next one,
+    /// the last to the leftmost cross-section point.
+    strips: Vec<(i64, [f64; 2])>,
+    /// (centre dlat at start and end, height, from AC).
+    walls: Vec<([f64; 2], f64, bool)>,
+    from_ac: bool,
+}
+
+/// What's across the road at one spot: ground samples (dlat, AC height, NR2003 surface) and
+/// the wall found on each side (distance from the centre, AC height of its top).
+struct Cross {
+    samples: Vec<(f64, f64, i64)>,
+    wall: [Option<(f64, f64)>; 2],
+}
+
+/// Look across the road at `t` (0..1) along piece `pc`: step sideways from the centre on both
+/// sides reading AC's ground, until it runs out, an AC wall, or `limit` (per side).
+#[allow(clippy::too_many_arguments)]
+fn look_across(pc: &Piece, t: f64, limit: [f64; 2], z_centre: f64, roads: &RoadHeights, walls: &AcWalls, nr: &[i64], step: f64) -> Cross {
+    let d = pc.len * t;
+    let p = pc.at(d);
+    let h = pc.h0 + (pc.h1 - pc.h0) * t;
+    let left = [-h.sin(), h.cos()];
+    let mut out = Cross { samples: Vec::new(), wall: [None, None] };
+    for (side, sign) in [(0usize, -1.0f64), (1, 1.0)] {
+        let dir = [left[0] * sign, left[1] * sign];
+        let mut lim = limit[side];
+        if let Some((dist, top)) = walls.cast(p, dir, lim + 0.5) {
+            out.wall[side] = Some((dist, top));
+            lim = lim.min(dist);
+        }
+        let mut z = z_centre;
+        let mut misses = 0;
+        let first = if side == 0 { 1 } else { 0 };
+        let mut k = first;
+        loop {
+            let dd = k as f64 * step;
+            if dd > lim {
+                break;
+            }
+            k += 1;
+            let q = [p[0] + dir[0] * dd, p[1] + dir[1] * dd];
+            match roads.at_surface(q[0], q[1], z, 0.6) {
+                Some((zz, sf)) => {
+                    misses = 0;
+                    z = zz;
+                    out.samples.push((sign * dd, zz, nr.get(sf).copied().unwrap_or(1)));
+                }
+                None => {
+                    misses += 1;
+                    if misses as f64 * step > 1.5 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out.samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
+}
+
+/// Runs of the same surface across the road: (surface, from dlat, to dlat), right to left.
+/// Strips narrower than 0.5 m are merged into a neighbour. None if there's no ground under the
+/// centre of the road.
+fn runs(c: &Cross) -> Option<Vec<(i64, f64, f64)>> {
+    let sm = &c.samples;
+    if sm.len() < 2 || !(sm[0].0 <= 0.0 && sm[sm.len() - 1].0 >= 0.0) {
+        return None;
+    }
+    let mut out: Vec<(i64, f64, f64)> = Vec::new();
+    for k in 0..sm.len() {
+        let (d, _, surf) = sm[k];
+        match out.last_mut() {
+            Some(last) if last.0 == surf => last.2 = d,
+            Some(last) => {
+                let mid = 0.5 * (last.2 + d);
+                last.2 = mid;
+                out.push((surf, mid, d));
+            }
+            None => out.push((surf, d, d)),
+        }
+    }
+    // merge narrow strips
+    loop {
+        let narrow = out
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.2 - r.1 < 0.5)
+            .min_by(|a, b| (a.1 .2 - a.1 .1).total_cmp(&(b.1 .2 - b.1 .1)))
+            .map(|(i, _)| i);
+        let Some(i) = narrow else { break };
+        if out.len() == 1 {
+            break;
+        }
+        let into = if i == 0 {
+            1
+        } else if i + 1 == out.len() {
+            i - 1
+        } else if out[i - 1].2 - out[i - 1].1 >= out[i + 1].2 - out[i + 1].1 {
+            i - 1
+        } else {
+            i + 1
+        };
+        let (a, b) = (out[i].1.min(out[into].1), out[i].2.max(out[into].2));
+        out[into].1 = a;
+        out[into].2 = b;
+        out.remove(i);
+        // join neighbours that now have the same surface
+        let mut k = 0;
+        while k + 1 < out.len() {
+            if out[k].0 == out[k + 1].0 {
+                out[k].2 = out[k + 1].2;
+                out.remove(k + 1);
+            } else {
+                k += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+fn surfaces_of(r: &Option<Vec<(i64, f64, f64)>>) -> Option<Vec<i64>> {
+    r.as_ref().map(|v| v.iter().map(|x| x.0).collect())
+}
+
 /// Convert an AC scene into an NR2003 track graph, using `template` (a stock .ptf graph) for
 /// the pieces' strips, walls and track settings.
 pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Converted> {
@@ -956,8 +1272,50 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     report.worst_height_m = worst_h;
     report.mean_height_m = sum_h / n as f64;
 
-    // --- room beside the road for run-off (so parallel stretches don't overlap)
-    let (room_r, room_l) = room_beside(&cl, opt.grass_m);
+    // --- room beside the road (so parallel stretches don't overlap)
+    let max_side = if opt.ac_ground { opt.ground_m.max(opt.grass_m) } else { opt.grass_m };
+    let (room_r, room_l) = room_beside(&cl, max_side);
+    let walls_ac = AcWalls::new(scene);
+    let nr: Vec<i64> = scene.surfaces.iter().map(|sf| nr_surface(&sf.key, sf.valid)).collect();
+    let use_ac = opt.ac_ground && report.heights_found > 0.5;
+    // Ground that can't be read between the road and a wall: grass, or concrete on tracks with
+    // no grass at all (street circuits like Monaco)
+    let has_grass = scene.meshes.iter().any(|m| {
+        m.surface.and_then(|k| scene.surfaces.get(k)).is_some_and(|sf| {
+            let k = sf.key.to_ascii_uppercase();
+            ["GRASS", "GRS", "GREEN"].iter().any(|w| k.contains(w))
+        })
+    });
+    let filler: i64 = if has_grass { 4 } else { 2 };
+    let step = 0.25;
+    // AC height of the road centre at sample i (the profile is shifted by `base`)
+    let z_at = |i: usize| prof.hc[i % n] + base;
+    let limit_at = |i: usize| [0.5 * prof.w[i % n] + room_r[i % n], 0.5 * prof.w[i % n] + room_l[i % n]];
+
+    // --- split pieces whose ground changes along them (a kerb starting part-way, say)
+    if use_ac {
+        let mut i = 0;
+        while i < pieces.len() {
+            let pc = pieces[i].clone();
+            if pc.len >= 12.0 {
+                let seq = |t: f64| {
+                    let j = sample(pc.s0 + pc.len * t);
+                    surfaces_of(&runs(&look_across(&pc, t, limit_at(j), z_at(j), &roads, &walls_ac, &nr, step)))
+                };
+                let (a, m, b) = (seq(0.0), seq(0.5), seq(1.0));
+                if a != m || m != b {
+                    let d = (pc.len * 0.5 / ds).round() * ds;
+                    let mid_h = pc.h0 + (pc.h1 - pc.h0) * d / pc.len;
+                    let first = Piece { s0: pc.s0, len: d, h0: pc.h0, h1: mid_h, p0: pc.p0 };
+                    let second = Piece { s0: pc.s0 + d, len: pc.len - d, h0: mid_h, h1: pc.h1, p0: first.end() };
+                    pieces[i] = first;
+                    pieces.insert(i + 1, second);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
 
     // --- build the graph from the template
     let tpl = find_templates(template)?;
@@ -976,16 +1334,16 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     }
     let off = [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])];
     report.offset = off;
-    // Run-off width per side at every join between pieces: the room left beside both pieces
-    // that meet there (and short of a turn's centre). Within a piece the width runs straight
-    // from one join's value to the next, so it never goes past the room and walls don't step.
+    // Room beside the road per side at every join between pieces: the room left beside both
+    // pieces that meet there (and short of a turn's centre). Within a piece it runs straight from
+    // one join's value to the next, so it never goes past the room and walls don't step.
     let np = pieces.len();
-    let mut room_piece = vec![[opt.grass_m; 2]; np]; // [right, left]
+    let mut room_piece = vec![[max_side; 2]; np]; // [right, left]
     for (k, pc) in pieces.iter().enumerate() {
         let (a, b) = (sample(pc.s0), sample(pc.s0 + pc.len));
         let b_idx = if b <= a { b + n } else { b };
-        let mut r = (a..=b_idx).map(|j| room_r[j % n]).fold(opt.grass_m, f64::min);
-        let mut l = (a..=b_idx).map(|j| room_l[j % n]).fold(opt.grass_m, f64::min);
+        let mut r = (a..=b_idx).map(|j| room_r[j % n]).fold(max_side, f64::min);
+        let mut l = (a..=b_idx).map(|j| room_l[j % n]).fold(max_side, f64::min);
         if !pc.straight() {
             let radius = pc.len / (pc.h1 - pc.h0).abs();
             let half = 0.5 * prof.w[a].max(prof.w[b % n]);
@@ -1004,44 +1362,215 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
             [p[0].min(q[0]), p[1].min(q[1])]
         })
         .collect();
+    let wall_tpl = template.node(tpl.wall).context("template wall")?.clone();
+    let wh = 0.5 * wall_tpl.f("width0").max(0.05);
+    let mut by_surface: HashMap<i64, usize> = HashMap::new();
     let mut seg_ids = Vec::with_capacity(pieces.len());
     for (pi, pc) in pieces.iter().enumerate() {
         let (a, b) = (sample(pc.s0), sample(pc.s0 + pc.len));
         let straight = pc.straight();
         let radius = if straight { f64::INFINITY } else { pc.len / (pc.h1 - pc.h0).abs() };
         let inside = (pc.h1 - pc.h0).signum(); // +1: centre on the left
-        // road half widths at each end, and the run-off beyond (per end, see `join`)
-        let half = [0.5 * prof.w[a], 0.5 * prof.w[b]];
-        let (j0, j1) = (join[pi], join[(pi + 1) % np]);
-        let side = |v0: f64, v1: f64| -> Option<[f64; 2]> { (v0.max(v1) > 0.05).then(|| [v0.max(0.05), v1.max(0.05)]) };
-        let grass_r = side(j0[0], j1[0]);
-        let grass_l = side(j0[1], j1[1]);
         let len_at = |d: f64| if straight { pc.len } else { ((radius - inside * d) * (pc.h1 - pc.h0).abs()).max(0.01) };
         let path_scale = |d: f64| len_at(d) / pc.len;
-        // cross-section points: dlat per end, height per end, slope per end
-        let mut xs: Vec<([f64; 2], [f64; 2], [f64; 2])> = Vec::new();
-        let edge = |h: &Vec<f64>, d: [f64; 2]| -> ([f64; 2], [f64; 2], [f64; 2]) {
-            // grade along this edge, kept to a believable road grade (30%)
-            let m = |i: usize, dd: f64| (slope_at(h, i, ds) / path_scale(dd)).clamp(-0.3, 0.3);
-            (d, [h[a], h[b]], [m(a, d[0]), m(b, d[1])])
+        let half = [0.5 * prof.w[a], 0.5 * prof.w[b]];
+        let (j0, j1) = (join[pi], join[(pi + 1) % np]);
+        // grade along the road centre (from the smoothed profile), per end
+        let centre_slope = |i: usize| slope_at(&prof.hc, i, ds).clamp(-0.3, 0.3);
+
+        // ---- the layout: from AC's ground, else plain asphalt and grass
+        let mut layout: Option<Layout> = None;
+        // the ground's outer edges at each end as read from AC (for the fallback below, so it
+        // meets AC-ground neighbours exactly): what's found, out past any AC wall
+        let mut ac_edges: [Option<[f64; 2]>; 2] = [None, None];
+        if use_ac {
+            let lim0 = [half[0] + j0[0], half[0] + j0[1]];
+            let lim1 = [half[1] + j1[0], half[1] + j1[1]];
+            let c0 = look_across(pc, 0.0, lim0, z_at(a), &roads, &walls_ac, &nr, step);
+            let c1 = look_across(pc, 1.0, lim1, z_at(b), &roads, &walls_ac, &nr, step);
+            let cm = look_across(pc, 0.5, [0.5 * (lim0[0] + lim1[0]), 0.5 * (lim0[1] + lim1[1])], z_at(sample(pc.s0 + 0.5 * pc.len)), &roads, &walls_ac, &nr, step);
+            let edges_at = |c: &Cross, r: &Vec<(i64, f64, f64)>| -> [f64; 2] {
+                let mut e = [r[0].1, r.last().unwrap().2];
+                for (side, sign) in [(0usize, -1.0f64), (1, 1.0)] {
+                    if let Some(w) = c.wall[side] {
+                        let reach = sign * (w.0 + 2.0 * wh + 0.1);
+                        if (reach - e[side]) * sign > 0.0 {
+                            e[side] = reach;
+                        }
+                    }
+                }
+                e
+            };
+            let (r0, r1) = (runs(&c0), runs(&c1));
+            ac_edges = [r0.as_ref().map(|r| edges_at(&c0, r)), r1.as_ref().map(|r| edges_at(&c1, r))];
+            if let (Some(r0), Some(r1)) = (r0, r1) {
+                // the middle's strips (the start's where the middle can't be read)
+                let rm = runs(&cm).unwrap_or_else(|| r0.clone());
+                let same = |x: &Vec<(i64, f64, f64)>| x.iter().map(|q| q.0).eq(rm.iter().map(|q| q.0));
+                // boundaries per end (the middle's where the ends disagree, on short pieces)
+                // Outer edges at each end are what's found right there (so neighbouring pieces
+                // agree at the join). Strip edges: each end's own where both ends have the same
+                // strips as the middle; else the middle's, scaled between the ends' outer edges.
+                let mut outer_r = [r0[0].1, r1[0].1];
+                let mut outer_l = [r0.last().unwrap().2, r1.last().unwrap().2];
+                let mut strips: Vec<(i64, [f64; 2])> = if same(&r0) && same(&r1) {
+                    r0.iter().zip(&r1).map(|(p, q)| (p.0, [p.1, q.1])).collect()
+                } else {
+                    let (mr, ml) = (rm[0].1, rm.last().unwrap().2);
+                    rm.iter()
+                        .map(|run| {
+                            let f = ((run.1 - mr) / (ml - mr).max(1e-6)).clamp(0.0, 1.0);
+                            (run.0, [outer_r[0] + f * (outer_l[0] - outer_r[0]), outer_r[1] + f * (outer_l[1] - outer_r[1])])
+                        })
+                        .collect()
+                };
+                // The ground reaches past AC's walls, end by end; where AC has no readable ground
+                // before a wall, the gap becomes grass. AC's wall is used where it's at both ends,
+                // else a safety wall goes at the ground's edge.
+                let mut walls = Vec::new();
+                for (side, sign) in [(0usize, -1.0f64), (1, 1.0)] {
+                    let ends = [c0.wall[side], c1.wall[side]];
+                    let edge = if side == 0 { outer_r } else { outer_l };
+                    let reach = |e: usize| ends[e].map(|w| sign * (w.0 + 2.0 * wh + 0.1));
+                    let gap: Vec<f64> = (0..2).map(|e| reach(e).map_or(0.0, |r| ((r - edge[e]) * sign).max(0.0))).collect();
+                    if gap[0].max(gap[1]) > 0.5 {
+                        let g = |e: usize| edge[e] + sign * gap[e].max(0.05);
+                        if side == 0 {
+                            outer_r = [g(0), g(1)];
+                            strips.insert(0, (filler, outer_r));
+                        } else {
+                            strips.push((filler, outer_l));
+                            outer_l = [g(0), g(1)];
+                        }
+                    } else if side == 0 {
+                        outer_r = [edge[0] - gap[0], edge[1] - gap[1]];
+                        strips[0].1 = outer_r;
+                    } else {
+                        outer_l = [edge[0] + gap[0], edge[1] + gap[1]];
+                    }
+                    let edge = if side == 0 { outer_r } else { outer_l };
+                    match (ends[0], ends[1]) {
+                        (Some(w0), Some(w1)) => {
+                            let d = [sign * (w0.0 + wh), sign * (w1.0 + wh)];
+                            let ground = |i: usize, ww: (f64, f64)| ww.1 - z_at(i);
+                            let height = (0.5 * (ground(a, w0) + ground(b, w1))).clamp(0.5, 8.0);
+                            walls.push((d, height, true));
+                        }
+                        _ if opt.walls => walls.push(([edge[0] - sign * wh, edge[1] - sign * wh], wall_tpl.f("height0"), false)),
+                        _ => {}
+                    }
+                }
+                // cross-section points: every strip edge, the outer edges, and the road centre
+                let mut ds_pts: Vec<[f64; 2]> = vec![outer_r];
+                for st in strips.iter().skip(1) {
+                    ds_pts.push(st.1);
+                }
+                ds_pts.push(outer_l);
+                if !ds_pts.iter().any(|d| d[0].abs() < 0.3 && d[1].abs() < 0.3) {
+                    let at = ds_pts.iter().position(|d| d[0] + d[1] > 0.0).unwrap_or(ds_pts.len());
+                    ds_pts.insert(at, [0.0, 0.0]);
+                }
+                // keep them in order at both ends
+                for k in 1..ds_pts.len() {
+                    for e in 0..2 {
+                        if ds_pts[k][e] < ds_pts[k - 1][e] + 0.05 {
+                            ds_pts[k][e] = ds_pts[k - 1][e] + 0.05;
+                        }
+                    }
+                }
+                let delta = 3.0 / pc.len;
+                let height_at = |t: f64, d: f64, near: f64| -> Option<f64> {
+                    let p = pc.at(pc.len * t);
+                    let h = pc.h0 + (pc.h1 - pc.h0) * t;
+                    roads.at_surface(p[0] - h.sin() * d, p[1] + h.cos() * d, near, 2.5).map(|x| x.0)
+                };
+                let mut xs = Vec::new();
+                for d in &ds_pts {
+                    if d[0] == 0.0 && d[1] == 0.0 {
+                        xs.push(([0.0, 0.0], [prof.hc[a], prof.hc[b % n]], [centre_slope(a) / path_scale(0.0), centre_slope(b % n) / path_scale(0.0)]));
+                        continue;
+                    }
+                    let (za, zb) = (z_at(a), z_at(b));
+                    let h0 = height_at(0.0, d[0], za).unwrap_or(za);
+                    let h1 = height_at(1.0, d[1], zb).unwrap_or(zb);
+                    let dm = |t: f64| d[0] + (d[1] - d[0]) * t;
+                    // grade at each end measured 3 m either side of the join (the same for the
+                    // pieces on both sides, so the ground has no crease there)
+                    let grade = |t: f64, d: f64, h: f64, fallback: f64| -> f64 {
+                        match (height_at(t - delta, d, h), height_at(t + delta, d, h)) {
+                            (Some(p), Some(q)) => (q - p) / (2.0 * delta * len_at(d)),
+                            _ => fallback,
+                        }
+                    };
+                    let s0 = grade(0.0, dm(0.0), h0, centre_slope(a));
+                    let s1 = grade(1.0, dm(1.0), h1, centre_slope(b % n));
+                    xs.push((*d, [h0 - base, h1 - base], [s0.clamp(-0.3, 0.3), s1.clamp(-0.3, 0.3)]));
+                }
+                strips[0].1 = ds_pts[0];
+                layout = Some(Layout { xs, strips, walls, from_ac: true });
+            }
+        }
+        let layout = match layout {
+            Some(l) => l,
+            None => {
+                // plain asphalt with grass beside it (where AC's ground couldn't be read)
+                let side = |v0: f64, v1: f64| -> Option<[f64; 2]> { (v0.max(v1) > 0.05).then(|| [v0.max(0.05).min(opt.grass_m), v1.max(0.05).min(opt.grass_m)]) };
+                let grass_r = side(j0[0], j1[0]);
+                let grass_l = side(j0[1], j1[1]);
+                let edge = |h: &Vec<f64>, d: [f64; 2]| -> ([f64; 2], [f64; 2], [f64; 2]) {
+                    let m = |i: usize, dd: f64| (slope_at(h, i, ds) / path_scale(dd)).clamp(-0.3, 0.3);
+                    (d, [h[a], h[b]], [m(a, d[0]), m(b, d[1])])
+                };
+                let r_road = [-half[0], -half[1]];
+                let l_road = [half[0], half[1]];
+                let gr = grass_r.unwrap_or([0.0; 2]);
+                let gl = grass_l.unwrap_or([0.0; 2]);
+                let mut r_out = [-half[0] - gr[0], -half[1] - gr[1]];
+                let mut l_out = [half[0] + gl[0], half[1] + gl[1]];
+                // where an end can be read from AC, its outer edges are AC's
+                for e in 0..2 {
+                    if let Some(edges) = ac_edges[e] {
+                        r_out[e] = edges[0].min(-half[e] - 0.05);
+                        l_out[e] = edges[1].max(half[e] + 0.05);
+                    }
+                }
+                let grass_r = ((-half[0] - r_out[0]).max(-half[1] - r_out[1]) > 0.04).then_some(());
+                let grass_l = ((l_out[0] - half[0]).max(l_out[1] - half[1]) > 0.04).then_some(());
+                if grass_r.is_none() {
+                    r_out = [-half[0], -half[1]];
+                }
+                if grass_l.is_none() {
+                    l_out = [half[0], half[1]];
+                }
+                let mut xs = Vec::new();
+                let mut strips = Vec::new();
+                if grass_r.is_some() {
+                    xs.push(edge(&prof.hr, r_out));
+                    strips.push((filler, r_out));
+                }
+                xs.push(edge(&prof.hr, r_road));
+                xs.push(edge(&prof.hc, [0.0, 0.0]));
+                xs.push(edge(&prof.hl, l_road));
+                strips.push((1, r_road));
+                if grass_l.is_some() {
+                    xs.push(edge(&prof.hl, l_out));
+                    strips.push((filler, l_road));
+                }
+                let mut walls = Vec::new();
+                if opt.walls {
+                    walls.push(([r_out[0] + wh, r_out[1] + wh], wall_tpl.f("height0"), false));
+                    walls.push(([l_out[0] - wh, l_out[1] - wh], wall_tpl.f("height0"), false));
+                }
+                Layout { xs, strips, walls, from_ac: false }
+            }
         };
-        let r_road = [-half[0], -half[1]];
-        let l_road = [half[0], half[1]];
-        let gr = grass_r.unwrap_or([0.0; 2]);
-        let gl = grass_l.unwrap_or([0.0; 2]);
-        let r_out = [-half[0] - gr[0], -half[1] - gr[1]];
-        let l_out = [half[0] + gl[0], half[1] + gl[1]];
-        if grass_r.is_some() {
-            xs.push(edge(&prof.hr, r_out));
+        if layout.from_ac {
+            report.ac_ground_pieces += 1;
         }
-        xs.push(edge(&prof.hr, r_road));
-        xs.push(edge(&prof.hc, [0.0, 0.0]));
-        xs.push(edge(&prof.hl, l_road));
-        if grass_l.is_some() {
-            xs.push(edge(&prof.hl, l_out));
-        }
+
+        // ---- nodes: cross-section points
         let mut x_ids = Vec::new();
-        for (d, h, m) in &xs {
+        for (d, h, m) in &layout.xs {
             let mut x = tpl.x.clone();
             x.id = next;
             next += 1;
@@ -1051,46 +1580,40 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
             x_ids.push(x.id);
             nodes.insert(x.id, x);
         }
-        // ground strips, right to left: grass, asphalt, grass
-        let corners = |r: [f64; 2], l: [f64; 2]| Corners {
-            d: [r[0], r[1], l[1], l[0]],
-            len_r: len_at(0.5 * (r[0] + r[1])),
-            len_l: len_at(0.5 * (l[0] + l[1])),
-        };
+        // ground strips, right to left
+        let outer_left = layout.xs.last().map_or([0.0; 2], |x| x.0);
         let mut f_ids = Vec::new();
-        let strips: Vec<(i32, [f64; 2], [f64; 2])> = {
-            let mut v = Vec::new();
-            if grass_r.is_some() {
-                v.push((tpl.grass, r_out, r_road));
-            }
-            v.push((tpl.asphalt, r_road, l_road));
-            if grass_l.is_some() {
-                v.push((tpl.grass, l_road, l_out));
-            }
-            v
-        };
-        for (src, r, l) in strips {
+        for (k, (surface, r)) in layout.strips.iter().enumerate() {
+            let l = layout.strips.get(k + 1).map_or(outer_left, |s| s.1);
+            let src = tpl.strip_for(*surface);
             let tc = template_corners(&tpl_track, src).context("template strip geometry")?;
-            let id = clone_part(template, &mut nodes, &mut next, src, tc, corners(r, l))?;
+            let corners = Corners { d: [r[0], r[1], l[1], l[0]], len_r: len_at(0.5 * (r[0] + r[1])), len_l: len_at(0.5 * (l[0] + l[1])) };
+            let id = clone_part(template, &mut nodes, &mut next, src, tc, corners)?;
             let f = nodes.get_mut(&id).unwrap();
             f.set("dlat0", json!(r[0]))?;
             f.set("dlat1", json!(r[1]))?;
+            // the surface cars feel is AC's, whatever texture the template strip has
+            f.set("i15", json!(*surface))?;
+            *by_surface.entry(*surface).or_default() += 1;
             f_ids.push(id);
         }
-        // walls at the outer edges
+        // walls
         let mut w_ids = Vec::new();
-        if opt.walls {
-            let wt = template.node(tpl.wall).context("template wall")?;
-            let wh = 0.5 * wt.f("width0").max(0.05);
-            for d in [[r_out[0] + wh, r_out[1] + wh], [l_out[0] - wh, l_out[1] - wh]] {
-                let tc = template_corners(&tpl_track, tpl.wall).context("template wall geometry")?;
-                let len = len_at(0.5 * (d[0] + d[1]));
-                let id = clone_part(template, &mut nodes, &mut next, tpl.wall, tc, Corners { d: [d[0], d[1], d[1], d[0]], len_r: len, len_l: len })?;
-                let w = nodes.get_mut(&id).unwrap();
-                w.set("dlat0", json!(d[0]))?;
-                w.set("dlat1", json!(d[1]))?;
-                w_ids.push(id);
+        for (d, height, from_ac) in &layout.walls {
+            let tc = template_corners(&tpl_track, tpl.wall).context("template wall geometry")?;
+            let len = len_at(0.5 * (d[0] + d[1]));
+            let id = clone_part(template, &mut nodes, &mut next, tpl.wall, tc, Corners { d: [d[0], d[1], d[1], d[0]], len_r: len, len_l: len })?;
+            let w = nodes.get_mut(&id).unwrap();
+            w.set("dlat0", json!(d[0]))?;
+            w.set("dlat1", json!(d[1]))?;
+            w.set("height0", json!(*height))?;
+            w.set("height1", json!(*height))?;
+            if *from_ac {
+                report.ac_walls += 1;
+            } else {
+                report.safety_walls += 1;
             }
+            w_ids.push(id);
         }
         // the piece itself
         let mut seg = tpl.seg.clone();
@@ -1109,6 +1632,9 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
         seg_ids.push(seg.id);
         nodes.insert(seg.id, seg);
     }
+    let mut sv: Vec<(i64, usize)> = by_surface.into_iter().collect();
+    sv.sort_unstable();
+    report.strips_by_surface = sv;
     // the root: the template's settings with the new pieces and no objects
     let mut root = template.root().clone().with_list("tsoref", &[])?;
     let at = root.fields.iter().position(|f| f.0 == "seg_size").context("template root has no piece list")?;

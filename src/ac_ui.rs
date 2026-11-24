@@ -175,7 +175,7 @@ impl AcView {
             return;
         }
         let (dir, layout) = (l.dir.clone(), l.layout.clone());
-        let template_dir = settings.game_tracks().join(settings.template_track.trim());
+        let template_dir = ac_template_dir(settings);
         let out = settings.workspace_dir.join(&name);
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
@@ -243,13 +243,30 @@ impl AcView {
     }
 
     /// The "Make an NR2003 track" section.
-    fn make_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, settings: &Settings) {
+    fn make_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, settings: &mut Settings) {
         ui.separator();
         ui.label(RichText::new("Make an NR2003 track").strong().size(15.0));
         ui.label("Fits NR2003 straights and curves to this track (its shape, width, hills and banking) and saves it in your Sandbox workspace.");
         ui.horizontal(|ui| {
             ui.label("Name");
             ui.add(egui::TextEdit::singleline(&mut self.nr_name).desired_width(200.0));
+        });
+        // the template: an installed track with a road course's surfaces (watkins_glen by default)
+        let tdir = ac_template_dir(settings);
+        ui.horizontal(|ui| {
+            ui.label("Ground textures from").on_hover_text(
+                "An installed NR2003 track. Its asphalt, grass, sand, kerb and wall textures and its track settings are copied. \
+                 A road course with all of those (watkins_glen) works best.",
+            );
+            let current = tdir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            egui::ComboBox::from_id_salt("ac_template").selected_text(&current).width(180.0).height(400.0).show_ui(ui, |ui| {
+                for name in installed_tracks(settings) {
+                    if ui.selectable_label(name.eq_ignore_ascii_case(&current), &name).clicked() {
+                        settings.ac_template = name;
+                        let _ = settings.save();
+                    }
+                }
+            });
         });
         let dest = settings.workspace_dir.join(self.nr_name.trim()).join(format!("{}.ptf", self.nr_name.trim()));
         ui.label(RichText::new(format!("Saves to {}", dest.display())).weak());
@@ -292,6 +309,21 @@ impl AcView {
             ui.label("Lap");
             ui.label(format!("{:.0} m", r.length_nr));
             ui.end_row();
+            ui.label("Ground");
+            ui.label(format!(
+                "from AC on {} of {} pieces ({})",
+                r.ac_ground_pieces,
+                r.pieces,
+                r.strips_by_surface
+                    .iter()
+                    .map(|(s, n)| format!("{} {n}", ttk::track::model::surface_name(*s).to_ascii_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            ui.end_row();
+            ui.label("Walls");
+            ui.label(format!("{} where AC has walls, {} at the edge of the ground", r.ac_walls, r.safety_walls));
+            ui.end_row();
             if r.warnings > 0 {
                 ui.label("Warnings");
                 ui.label(format!("{} (see Check in Look at a track)", r.warnings));
@@ -310,8 +342,9 @@ impl AcView {
         });
         ui.label(
             RichText::new(
-                "For now the ground is plain asphalt with grass and a wall on each side. AC's own kerbs, run-off and walls, \
-                 scenery, AI lines and pit stalls come in the next phases. To try it in NR2003, use Build track with this name.",
+                "The ground (road, kerbs, grass, sand) and walls follow AC's; their textures come from the track above. \
+                 AC's own textures and scenery, the AI lines and pit stalls come in the next phases. \
+                 To try it in NR2003, use Build track with this name.",
             )
             .weak(),
         );
@@ -696,6 +729,32 @@ impl AcView {
         };
         painter.text(rect.left_top() + egui::vec2(10.0, 8.0), egui::Align2::LEFT_TOP, hint, egui::FontId::proportional(13.0), Color32::from_gray(235));
     }
+}
+
+/// The installed track AC conversions copy textures and settings from: the chosen one
+/// (watkins_glen by default) if it's installed, else the Build tab's template.
+fn ac_template_dir(settings: &Settings) -> PathBuf {
+    let chosen = settings.game_tracks().join(settings.ac_template.trim());
+    if !settings.ac_template.trim().is_empty() && ttk::track::graph::track_file_in(&chosen).is_some() {
+        chosen
+    } else {
+        settings.game_tracks().join(settings.template_track.trim())
+    }
+}
+
+/// Installed NR2003 tracks (folders with a .ptf or .dat), sorted.
+fn installed_tracks(settings: &Settings) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(settings.game_tracks())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && ttk::track::graph::track_file_in(p).is_some())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .filter(|n| !n.eq_ignore_ascii_case("shared"))
+        .collect();
+    v.sort_by_key(|n| n.to_ascii_lowercase());
+    v
 }
 
 #[cfg(test)]

@@ -81,6 +81,9 @@ fn main() -> anyhow::Result<()> {
             let col = match surf {
                 4 => Rgb([46, 90, 40]),
                 1 => Rgb([90, 90, 96]),
+                2 => Rgb([150, 150, 145]),
+                12 => Rgb([200, 50, 45]),
+                5 | 6 | 7 => Rgb([200, 175, 110]),
                 _ => Rgb([120, 100, 140]),
             };
             let f = s.fs.iter().find(|f| (0.5 * (f.dlat[0] + f.dlat[1]) - a0).abs() < 1e-6);

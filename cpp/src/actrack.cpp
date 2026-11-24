@@ -146,6 +146,23 @@ std::vector<Surface> surfaces(const Layout& l) {
         }
         out.push_back(std::move(s));
     }
+    // Every track also has AC's own surfaces (system\data\surfaces.ini: ROAD, GRASS, KERB, SAND);
+    // mugello's grass uses those. The track's own come first and win.
+    for (fs::path p = fs::path(l.dataDir); !p.empty() && p.has_parent_path() && p != p.parent_path(); p = p.parent_path()) {
+        const fs::path global = p / "system" / "data" / "surfaces.ini";
+        if (!fs::is_regular_file(global)) continue;
+        for (const auto& [section, kv] : readIni(global)) {
+            const auto k = kv.find("KEY");
+            if (section.rfind("SURFACE_", 0) != 0 || k == kv.end() || k->second.empty()) continue;
+            if (std::any_of(out.begin(), out.end(), [&](const Surface& s) { return s.key == k->second; })) continue;
+            Surface s;
+            s.key = k->second;
+            if (const auto v = kv.find("IS_VALID_TRACK"); v != kv.end()) s.validTrack = v->second != "0";
+            if (const auto v = kv.find("IS_PITLANE"); v != kv.end()) s.pitlane = v->second == "1";
+            out.push_back(std::move(s));
+        }
+        break;
+    }
     // AC treats meshes named <digits>WALL... as walls even when surfaces.ini doesn't list WALL
     // (monaco_2020's 0WALL01...).
     if (std::none_of(out.begin(), out.end(), [](const Surface& s) { return s.key == "WALL"; })) {
