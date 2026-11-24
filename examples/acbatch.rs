@@ -11,13 +11,22 @@ fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     anyhow::ensure!(a.len() >= 4, "usage: acbatch <AC tracks folder> <template track folder> <log file> [first N]");
     let tracks = ac::list_tracks(&PathBuf::from(&a[1]));
-    let limit: usize = a.get(4).and_then(|x| x.parse().ok()).unwrap_or(usize::MAX);
+    let limit: usize = a.get(4).and_then(|x| x.parse().ok()).filter(|_| a.get(4).is_some_and(|x| x != "--from")).unwrap_or(usize::MAX);
     let tpl_dir = PathBuf::from(&a[2]);
     let tpl_file = track::graph::track_file_in(&tpl_dir).ok_or_else(|| anyhow::anyhow!("no template track in {}", tpl_dir.display()))?;
     let (bytes, _) = track::graph::load_ptf_bytes(&tpl_file)?;
     let template = track::graph::parse_ptf(&bytes)?;
-    let mut log = std::fs::File::create(&a[3])?;
-    writeln!(log, "track\tlayout\tresult\tseconds\tpieces\tworst_m\tmean_m\theights_found\tac_ground\tac_walls\twarnings\tdetail")?;
+    // --from <name>: resume at that track, adding to the log
+    let from = a.iter().position(|x| x == "--from").and_then(|k| a.get(k + 1)).cloned();
+    let tracks: Vec<(String, PathBuf)> = match &from {
+        Some(f) => tracks.iter().skip_while(|t| !t.0.eq_ignore_ascii_case(f)).cloned().collect(),
+        None => tracks,
+    };
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(&a[3])?;
+    if from.is_none() {
+        log.set_len(0)?;
+        writeln!(log, "track\tlayout\tresult\tseconds\tpieces\tworst_m\tmean_m\theights_found\tac_ground\tac_walls\twarnings\tdetail")?;
+    }
     let tmp_scene = std::env::temp_dir().join(format!("acbatch_{}.acscene", std::process::id()));
     let tmp_out = std::env::temp_dir().join(format!("acbatch_{}_out", std::process::id()));
     let (mut ok, mut failed) = (0, 0);

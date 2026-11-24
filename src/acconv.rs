@@ -106,6 +106,11 @@ pub fn centerline(ai: &[AcAiPoint], ds: f64) -> Result<Centerline> {
     if n < 20 {
         bail!("the AC track has no usable AI line (ai\\fast_lane.ai)");
     }
+    // Open-world maps (FDR: 160 km "laps") are far beyond what an NR2003 track can be.
+    let lap = ai.last().map_or(0.0, |p| p.distance as f64);
+    if lap > 40_000.0 {
+        bail!("this layout is {:.0} km round; NR2003 tracks can't be anywhere near that long (the longest real circuits are about 25 km)", lap / 1000.0);
+    }
     let have_edges = ai.iter().filter(|p| p.left + p.right > 1.0).count() > n / 2;
     // The AI line (smoothed over ~8 m; points are 1-2 m apart), and how far the middle of the
     // road is to its left (smoothed over ~20 m: AC's edge distances can jump, and a jump would
