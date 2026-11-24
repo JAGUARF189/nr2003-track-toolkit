@@ -552,6 +552,9 @@ fn refine(fit: &mut Fit, cl: &Centerline, total: f64, iterations: usize) {
     }
 }
 
+/// Most pieces a conversion may start with (see fit_plan).
+const MAX_PIECES: usize = 3000;
+
 /// Straights: pieces whose heading barely changes.
 const STRAIGHT_TURN: f64 = 0.35 * PI / 180.0;
 
@@ -577,6 +580,14 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
     }
     // a first fit of the heading within ~0.8°, then refine and split where it strays
     let mut knots = split_knots(&h, 0.8f64.to_radians());
+    // Far more pieces than any NR2003 track has (the most installed: 660) means an open-world
+    // map or a very wiggly road; fitting it would take ages and the game couldn't use it.
+    if knots.len() > MAX_PIECES {
+        bail!(
+            "this layout would need about {} pieces; that's far more than NR2003 tracks have (the biggest installed track has 660), so it isn't converted",
+            knots.len()
+        );
+    }
     for _ in 0..40 {
         let (straight, turn) = classify(&h, &knots);
         let mut fit = Fit { knots: knots.clone(), straight, turn, h0: h[0], p0: cl.pos[0] };
@@ -608,7 +619,8 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
                 add.push((*i).clamp(a + 2, b - 2));
             }
         }
-        if worst <= tol_m || add.is_empty() {
+        // stop splitting at the cap: a slightly looser fit beats one NR2003 can't use
+        if worst <= tol_m || add.is_empty() || knots.len() + add.len() > MAX_PIECES {
             return Ok((fit.pieces(cl.ds), worst, mean));
         }
         knots.extend(add);
@@ -1305,7 +1317,11 @@ fn clip_inside(l: &mut Layout, inside: f64, limit: f64, wall_half: f64) {
     let limit = limit.max(0.1);
     let clip = |d: f64| if inside > 0.0 { d.min(limit) } else { d.max(-limit) };
     let beyond = |d: f64| if inside > 0.0 { d >= limit - 1e-9 } else { d <= -limit + 1e-9 };
-    if !l.xs.iter().any(|x| beyond(x.0[0]) || beyond(x.0[1])) && !l.strips.iter().any(|st| beyond(st.1[0]) || beyond(st.1[1])) {
+    let wall_beyond = |d: f64| if inside > 0.0 { d > limit - wall_half } else { d < -limit + wall_half };
+    if !l.xs.iter().any(|x| beyond(x.0[0]) || beyond(x.0[1]))
+        && !l.strips.iter().any(|st| beyond(st.1[0]) || beyond(st.1[1]))
+        && !l.walls.iter().any(|w| wall_beyond(w.0[0]) || wall_beyond(w.0[1]))
+    {
         return;
     }
     for x in &mut l.xs {
