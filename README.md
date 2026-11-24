@@ -143,11 +143,10 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
 - **Command line:** `track-toolkit.exe --ac <AC track folder> [--layout name] [--3d]`.
 - **How it works:** the reading is done in C++ by `acdump.exe` (`cpp\src\kn5.cpp`, `dds.cpp`, `actrack.cpp`):
   - `.kn5` models, versions 5 and 6.
-  - DDS textures: DXT1/3/5 and uncompressed. PNG/JPEG pictures stored in a model are decoded by the app.
-  - Layouts from `models.ini` / `models_<layout>.ini`, the surfaces from `surfaces.ini`, and the AI line from `fast_lane.ai`.
+  - DDS textures: DXT1/3/5, BC7 and uncompressed, with the old or the DX10 header. PNG/JPEG pictures stored in a model are decoded by the app.
+  - Layouts from `models.ini` / `models_<layout>.ini` and `ui\<layout>\`, the surfaces from the track's and AC's own `surfaces.ini`, and the AI line from `fast_lane.ai`.
 - **Tested on:** Mugello (Kunos) and Monaco 2020 with its F1 2022–2026 layouts (a mod). `tests\ac_scene.rs` runs against the AC install when it's there.
 - **Not yet:**
-  - BC7-compressed textures; they show in plain colour.
   - AC's multi-layer road shaders, which show their main layer only.
   - Encrypted `.kn5` files, which are refused, and that's on purpose.
 - **Make NR2003 track** (phase 2) fits NR2003 straights and curves to the AC track and saves it as `tracks\<name>\<name>.ptf` in your Sandbox workspace, with the textures it uses.
@@ -169,6 +168,14 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - Monaco F1 2026: 283 pieces, within 0.11 m.
     - Both pass the checker, and each takes about 1 s.
   - **After converting:** **Look at it** opens the result in the Look at a track tab, and an orange line shows it over the AC track. To try it in NR2003, use Build track with the same name.
+  - **Tested across your AC tracks:** `examples\acbatch.rs` converts every installed AC track and layout. It fixed:
+    - layouts kept only under `ui\<layout>`
+    - lower-case `1_track` names
+    - track edges missing from, or nonsense in, the AI file (now measured on AC's road)
+    - kinked centerlines
+    - turns tighter than the road is wide (the inside is clipped)
+    - an endless loop
+  - **Point-to-point roads** can't be converted (NR2003 tracks are loops), and the converter says so.
   - **Command line:** `cargo run --release --example acconvert -- <AC folder> <layout|-> <template folder> <out folder> <name>`.
     - `examples\acplot.rs` draws a top-down comparison picture.
     - `examples\acprobe.rs` lists AC's surfaces across the road.
