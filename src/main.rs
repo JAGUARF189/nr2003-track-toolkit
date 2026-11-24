@@ -10,6 +10,7 @@ use ttk::steps::{run_all_steps, run_steps, validate_track_name, Ctx, Step};
 
 mod textures_ui;
 mod track_ui;
+mod ac_ui;
 
 const MAX_LOG_LINES: usize = 10_000;
 
@@ -18,6 +19,7 @@ enum Tab {
     Build,
     Textures,
     Track,
+    Ac,
 }
 
 fn main() -> eframe::Result<()> {
@@ -37,6 +39,14 @@ fn main() -> eframe::Result<()> {
             let mut app = App::new();
             // `track-toolkit.exe <track.ptf|.dat> [--3d] [--piece N] [--wall N | --strip N] [--objects]` opens straight into the Track tab.
             let args: Vec<String> = std::env::args().skip(1).collect();
+            // `track-toolkit.exe --ac <AC track folder> [--layout name] [--3d]` opens the Assetto Corsa tab.
+            if let Some(k) = args.iter().position(|a| a == "--ac") {
+                if let Some(folder) = args.get(k + 1) {
+                    app.tab = Tab::Ac;
+                    let layout = args.iter().position(|a| a == "--layout").and_then(|k| args.get(k + 1)).cloned().unwrap_or_default();
+                    app.ac_view.open_on_start(PathBuf::from(folder), layout, args.iter().any(|a| a == "--3d"));
+                }
+            }
             if let Some(file) = args.iter().find(|a| {
                 let l = a.to_ascii_lowercase();
                 l.ends_with(".ptf") || l.ends_with(".dat")
@@ -103,6 +113,7 @@ struct App {
     tab: Tab,
     textures: textures_ui::TexturesView,
     track_view: track_ui::TrackView,
+    ac_view: ac_ui::AcView,
 }
 
 impl App {
@@ -138,6 +149,7 @@ impl App {
             tab: Tab::Build,
             textures: textures_ui::TexturesView::default(),
             track_view: track_ui::TrackView::default(),
+            ac_view: ac_ui::AcView::default(),
         };
         app.push(
             Level::Info,
@@ -383,7 +395,12 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                for (t, label) in [(Tab::Build, "Build track"), (Tab::Textures, "Textures"), (Tab::Track, "Look at a track")] {
+                for (t, label) in [
+                    (Tab::Build, "Build track"),
+                    (Tab::Textures, "Textures"),
+                    (Tab::Track, "Look at a track"),
+                    (Tab::Ac, "Assetto Corsa"),
+                ] {
                     let b = egui::Button::new(RichText::new(label).size(16.0).strong())
                         .selected(self.tab == t);
                     if ui.add(b).clicked() {
@@ -393,7 +410,7 @@ impl eframe::App for App {
             });
             ui.separator();
             // The build bar (track, new track, Run all, Settings) isn't used by the Track tab.
-            if self.tab != Tab::Track {
+            if self.tab != Tab::Track && self.tab != Tab::Ac {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Track").strong());
                 let mut pick: Option<String> = None;
@@ -539,6 +556,8 @@ impl eframe::App for App {
                 sandbox: &self.settings.sandbox_dir,
             };
             self.textures.show(ctx, &env);
+        } else if self.tab == Tab::Ac {
+            self.ac_view.show(ctx, &mut self.settings);
         } else if self.tab == Tab::Track {
             let folders: Vec<(String, PathBuf)> = self
                 .game_tracks

@@ -26,6 +26,9 @@ pub struct Batch {
 
 pub struct TrackMesh {
     pub verts: Vec<f32>,
+    /// Triangle corners as vertex numbers; empty = every 3 vertices make a triangle. When set,
+    /// the batches' `first`/`count` count indices instead of vertices.
+    pub indices: Vec<u32>,
     pub batches: Vec<Batch>,
     /// World position subtracted from every vertex (keeps f32 precise on big tracks).
     pub origin: [f64; 3],
@@ -305,7 +308,7 @@ pub fn build(track: &Track, show_walls: bool) -> TrackMesh {
     }
 
     let (verts, batches) = m.finish();
-    TrackMesh { verts, batches, origin, centerlines, extent: [b[2] - b[0], b[3] - b[1], zmin, zmax] }
+    TrackMesh { verts, indices: Vec::new(), batches, origin, centerlines, extent: [b[2] - b[0], b[3] - b[1], zmin, zmax] }
 }
 
 /// Markers for the placed objects (2 m boxes, 3 m tall), coloured by `color(index)`, in the

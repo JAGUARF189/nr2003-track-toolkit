@@ -8,6 +8,7 @@
 //! 5. Install   — copy into NR2003 `tracks\<name>` with template ini/cam/sim/lp files
 //! 6. Stalls    — `mkstalls` on an LP file, merged into track.ini
 
+pub mod ac;
 pub mod config;
 pub mod dat;
 pub mod inifile;

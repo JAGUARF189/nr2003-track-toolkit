@@ -131,6 +131,31 @@ ptfjson check <in.ptf>...          (re-encode and byte-compare)
   - Every test saves and reads the file back.
 - **Real clicks:** `re\gui_shot.ps1` refuses to send input if the PC was used in the last minute, or if anything but the toolkit is in front.
 
+## Assetto Corsa tracks (converting to NR2003, phase 1 of 5)
+
+The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views, with its textures.
+- **Finding tracks:** it finds AC through Steam's library list, or you can pick the `content\tracks` folder yourself.
+- **Picking:** choose a track and, for tracks with several layouts, the layout.
+- **What it shows:**
+  - The AI line, with the track edges stored alongside it.
+  - The pit boxes and grid spots (AC's `AC_PIT_n` / `AC_START_n` markers).
+  - What cars drive on, listed in plain words: road, kerbs, grass, walls, pit lane. Tick **Colour what cars drive on** to see them in plain colours, including the hidden ones AC uses only for driving.
+- **Command line:** `track-toolkit.exe --ac <AC track folder> [--layout name] [--3d]`.
+- **How it works:** the reading is done in C++ by `acdump.exe` (`cpp\src\kn5.cpp`, `dds.cpp`, `actrack.cpp`):
+  - `.kn5` models, versions 5 and 6.
+  - DDS textures: DXT1/3/5 and uncompressed. PNG/JPEG pictures stored in a model are decoded by the app.
+  - Layouts from `models.ini` / `models_<layout>.ini`, the surfaces from `surfaces.ini`, and the AI line from `fast_lane.ai`.
+- **Tested on:** Mugello (Kunos) and Monaco 2020 with its F1 2022–2026 layouts (a mod). `tests\ac_scene.rs` runs against the AC install when it's there.
+- **Not yet:**
+  - BC7-compressed textures; they show in plain colour.
+  - AC's multi-layer road shaders, which show their main layer only.
+  - Encrypted `.kn5` files, which are refused, and that's on purpose.
+- **Next phases:**
+  2. Fit the NR2003 centerline to the AI line and write a drivable `.ptf`.
+  3. Ground strips and walls from AC's surfaces.
+  4. Scenery and textures as `.3do`/`.mip`.
+  5. AI lines, cameras and pit stalls.
+
 ## Where things are stored
 
 - **Settings:** `%APPDATA%\TrackToolkit\settings.json`. Holds the Sandbox folder, the NR2003 folder, the workspace folder and the template track.

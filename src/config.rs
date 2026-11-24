@@ -20,6 +20,8 @@ pub struct Settings {
     pub autosave: bool,
     /// Track tab: seconds between automatic saves (only when there are unsaved changes).
     pub autosave_secs: u64,
+    /// Assetto Corsa's `content\tracks` folder (empty: look for it).
+    pub ac_tracks_dir: PathBuf,
 }
 
 impl Default for Settings {
@@ -32,6 +34,7 @@ impl Default for Settings {
             last_track: String::new(),
             autosave: true,
             autosave_secs: 300,
+            ac_tracks_dir: PathBuf::new(),
         }
     }
 }

@@ -25,3 +25,16 @@ target_link_libraries(ptfcheck PRIVATE ptf)
 # .ptf <-> JSON converter and round-trip checker (used by the Track Toolkit GUI).
 add_executable(ptfjson tools/ptfjson.cpp)
 target_link_libraries(ptfjson PRIVATE ptf)
+
+# Assetto Corsa track reading (.kn5 models, .dds pictures, layouts, AI line).
+add_library(ac STATIC
+  src/kn5.cpp
+  src/dds.cpp
+  src/actrack.cpp
+)
+target_include_directories(ac PUBLIC src)
+
+# AC track folder -> info JSON / 3D scene for the Track Toolkit.
+add_executable(acdump tools/acdump.cpp)
+target_link_libraries(acdump PRIVATE ac)
+target_compile_definitions(acdump PRIVATE _CRT_SECURE_NO_WARNINGS)

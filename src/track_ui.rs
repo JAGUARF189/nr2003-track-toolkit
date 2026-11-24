@@ -67,16 +67,16 @@ struct Loaded {
     tex_tried: Vec<String>,
 }
 
-struct Camera {
+pub(crate) struct Camera {
     // map (top-down): centre and half height of the visible area, in mesh metres
-    cx: f64,
-    cy: f64,
-    half_h: f64,
+    pub cx: f64,
+    pub cy: f64,
+    pub half_h: f64,
     // 3D orbit
-    target: [f64; 3],
-    yaw: f64,
-    pitch: f64,
-    dist: f64,
+    pub target: [f64; 3],
+    pub yaw: f64,
+    pub pitch: f64,
+    pub dist: f64,
 }
 
 impl Default for Camera {
@@ -331,7 +331,7 @@ impl TrackView {
     pub(super) fn upload_mesh(&mut self) {
         let Some(l) = &mut self.loaded else { return };
         let mut scene = self.scene.lock().unwrap();
-        scene.pending = Some((std::mem::take(&mut l.mesh.verts), l.mesh.batches.clone()));
+        scene.pending = Some((std::mem::take(&mut l.mesh.verts), std::mem::take(&mut l.mesh.indices), l.mesh.batches.clone()));
         if let Some(store) = &l.tex_store {
             for f in l.mesh.textures() {
                 let key = f.to_ascii_lowercase();
@@ -610,65 +610,22 @@ impl TrackView {
         let aspect = self.aspect;
 
         // ---- input
-        let scroll = if resp.hovered() { ui.input(|i| i.smooth_scroll_delta.y) as f64 } else { 0.0 };
-        let delta = resp.drag_delta();
-        let (dx, dy) = (delta.x as f64, delta.y as f64);
-        match self.view {
-            View::Map => {
-                let mpp = 2.0 * self.cam.half_h / rect.height() as f64; // metres per pixel
-                // In Objects mode the left button picks and moves objects; pan with the right or middle.
-                let pan = if self.mode == Mode::Objects {
-                    resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle)
-                } else {
-                    resp.dragged()
-                };
-                if pan {
-                    self.cam.cx -= dx * mpp;
-                    self.cam.cy += dy * mpp;
+        let left_pans = self.mode == Mode::Pieces;
+        camera_input(&mut self.cam, self.view == View::ThreeD, ui, &resp, rect, left_pans);
+        if self.view == View::Map && resp.clicked() && self.mode == Mode::Pieces {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let mpp = 2.0 * self.cam.half_h / rect.height() as f64;
+                let wx = self.cam.cx + (p.x - rect.center().x) as f64 * mpp + l.mesh.origin[0];
+                let wy = self.cam.cy - (p.y - rect.center().y) as f64 * mpp + l.mesh.origin[1];
+                let before = self.selected;
+                self.selected = pick(&l.mesh, &l.track, wx, wy);
+                let picked = self.selected.and_then(|k| parts::pick_part(&l.track.segments[k], wx, wy, (6.0 * mpp).max(0.3)));
+                if picked.is_some() || self.selected != before {
+                    self.part = picked;
+                    self.part_note = None;
+                    self.scroll_part = picked.is_some();
                 }
-                if scroll != 0.0 {
-                    // zoom about the cursor
-                    let f = (-scroll * 0.0015).exp();
-                    if let Some(p) = resp.hover_pos() {
-                        let wx = self.cam.cx + (p.x - rect.center().x) as f64 * mpp;
-                        let wy = self.cam.cy - (p.y - rect.center().y) as f64 * mpp;
-                        self.cam.cx = wx + (self.cam.cx - wx) * f;
-                        self.cam.cy = wy + (self.cam.cy - wy) * f;
-                    }
-                    self.cam.half_h = (self.cam.half_h * f).clamp(2.0, 50_000.0);
-                }
-                if resp.clicked() && self.mode == Mode::Pieces {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        let wx = self.cam.cx + (p.x - rect.center().x) as f64 * mpp + l.mesh.origin[0];
-                        let wy = self.cam.cy - (p.y - rect.center().y) as f64 * mpp + l.mesh.origin[1];
-                        let before = self.selected;
-                        self.selected = pick(&l.mesh, &l.track, wx, wy);
-                        let picked = self.selected.and_then(|k| parts::pick_part(&l.track.segments[k], wx, wy, (6.0 * mpp).max(0.3)));
-                        if picked.is_some() || self.selected != before {
-                            self.part = picked;
-                            self.part_note = None;
-                            self.scroll_part = picked.is_some();
-                        }
-                        self.scroll_list = true;
-                    }
-                }
-            }
-            View::ThreeD => {
-                if resp.dragged_by(egui::PointerButton::Primary) {
-                    self.cam.yaw -= dx * 0.008;
-                    self.cam.pitch = (self.cam.pitch + dy * 0.006).clamp(0.05, 1.55);
-                }
-                if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
-                    let s = self.cam.dist * 0.0015;
-                    let (sy, cy) = self.cam.yaw.sin_cos();
-                    // Grab-the-ground panning. Screen right on the ground = (-sin yaw, cos yaw),
-                    // forward (screen up) = (-cos yaw, -sin yaw).
-                    self.cam.target[0] += (sy * dx - cy * dy) * s;
-                    self.cam.target[1] += (-cy * dx - sy * dy) * s;
-                }
-                if scroll != 0.0 {
-                    self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(5.0, 50_000.0);
-                }
+                self.scroll_list = true;
             }
         }
 
@@ -749,6 +706,54 @@ fn shared_folder(track_dir: &Path) -> Option<PathBuf> {
     track_dir.parent().map(|t| t.join("shared")).filter(|d| d.is_dir())
 }
 
+/// Moving the camera with the mouse: on the map, drag (left if `left_pans`, else right or
+/// middle) to move and scroll to zoom about the cursor; in 3D, drag to turn, right/middle-drag
+/// to move, scroll to zoom.
+pub(crate) fn camera_input(cam: &mut Camera, three_d: bool, ui: &egui::Ui, resp: &egui::Response, rect: egui::Rect, left_pans: bool) {
+    let scroll = if resp.hovered() { ui.input(|i| i.smooth_scroll_delta.y) as f64 } else { 0.0 };
+    let delta = resp.drag_delta();
+    let (dx, dy) = (delta.x as f64, delta.y as f64);
+    if !three_d {
+        let mpp = 2.0 * cam.half_h / rect.height() as f64; // metres per pixel
+        let pan = if left_pans {
+            resp.dragged()
+        } else {
+            resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle)
+        };
+        if pan {
+            cam.cx -= dx * mpp;
+            cam.cy += dy * mpp;
+        }
+        if scroll != 0.0 {
+            // zoom about the cursor
+            let f = (-scroll * 0.0015).exp();
+            if let Some(p) = resp.hover_pos() {
+                let wx = cam.cx + (p.x - rect.center().x) as f64 * mpp;
+                let wy = cam.cy - (p.y - rect.center().y) as f64 * mpp;
+                cam.cx = wx + (cam.cx - wx) * f;
+                cam.cy = wy + (cam.cy - wy) * f;
+            }
+            cam.half_h = (cam.half_h * f).clamp(2.0, 50_000.0);
+        }
+    } else {
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            cam.yaw -= dx * 0.008;
+            cam.pitch = (cam.pitch + dy * 0.006).clamp(0.05, 1.55);
+        }
+        if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
+            let s = cam.dist * 0.0015;
+            let (sy, cy) = cam.yaw.sin_cos();
+            // Grab-the-ground panning. Screen right on the ground = (-sin yaw, cos yaw),
+            // forward (screen up) = (-cos yaw, -sin yaw).
+            cam.target[0] += (sy * dx - cy * dy) * s;
+            cam.target[1] += (-cy * dx - sy * dy) * s;
+        }
+        if scroll != 0.0 {
+            cam.dist = (cam.dist * (-scroll * 0.0015).exp()).clamp(5.0, 50_000.0);
+        }
+    }
+}
+
 fn piece_line(s: &model::Segment) -> String {
     if s.curve {
         let dir = if s.angle > 0.0 { "Left " } else { "Right" };
@@ -791,7 +796,7 @@ fn dist_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 // ------------------------------------------------------------------ matrices (column-major)
-type Mat = [f32; 16];
+pub(crate) type Mat = [f32; 16];
 
 fn mat_mul(a: &Mat, b: &Mat) -> Mat {
     let mut r = [0.0f32; 16];
@@ -803,7 +808,7 @@ fn mat_mul(a: &Mat, b: &Mat) -> Mat {
     r
 }
 
-fn mul_vec(m: &Mat, v: [f32; 4]) -> [f32; 4] {
+pub(crate) fn mul_vec(m: &Mat, v: [f32; 4]) -> [f32; 4] {
     let mut r = [0.0f32; 4];
     for row in 0..4 {
         r[row] = (0..4).map(|k| m[k * 4 + row] * v[k]).sum();
@@ -811,7 +816,7 @@ fn mul_vec(m: &Mat, v: [f32; 4]) -> [f32; 4] {
     r
 }
 
-fn map_matrix(c: &Camera, aspect: f64, m: &TrackMesh) -> Mat {
+pub(crate) fn map_matrix(c: &Camera, aspect: f64, m: &TrackMesh) -> Mat {
     let hh = c.half_h;
     let hw = hh * aspect;
     let zr = (m.extent[3] - m.extent[2]).max(1.0) * 4.0 + 100.0;
@@ -824,7 +829,7 @@ fn map_matrix(c: &Camera, aspect: f64, m: &TrackMesh) -> Mat {
     ]
 }
 
-fn orbit_matrix(c: &Camera, aspect: f64, m: &TrackMesh) -> Mat {
+pub(crate) fn orbit_matrix(c: &Camera, aspect: f64, m: &TrackMesh) -> Mat {
     let (sp, cp) = c.pitch.sin_cos();
     let (sy, cy) = c.yaw.sin_cos();
     let eye = [c.target[0] + c.dist * cp * cy, c.target[1] + c.dist * cp * sy, c.target[2] + c.dist * sp];
@@ -866,16 +871,19 @@ fn norm(a: [f64; 3]) -> [f64; 3] {
 /// Two layers drawn with the same program: the track, and the object markers (rebuilt on
 /// their own when objects move or the selection changes).
 #[derive(Default)]
-struct Scene {
+pub(crate) struct Scene {
     gl: Option<GlObjects>,
     failed: bool,
-    pending: Option<(Vec<f32>, Vec<Batch>)>,
-    pending_objects: Option<Vec<f32>>,
+    /// Track layer to upload: vertices, indices (empty = not indexed), batches.
+    pub pending: Option<(Vec<f32>, Vec<u32>, Vec<Batch>)>,
+    pub pending_objects: Option<Vec<f32>>,
     /// Textures to upload: (lower-case file, picture).
-    pending_tex: Vec<(String, image::RgbaImage)>,
+    pub pending_tex: Vec<(String, image::RgbaImage)>,
     /// Delete the uploaded textures first (another track was opened).
-    clear_textures: bool,
+    pub clear_textures: bool,
     batches: Vec<Batch>,
+    /// The track layer is drawn from indices.
+    indexed: bool,
     count_objects: i32,
     textures: std::collections::HashMap<String, glow::Texture>,
 }
@@ -884,6 +892,8 @@ struct GlObjects {
     program: glow::Program,
     /// (vertex array, buffer) for the track, then the objects
     layers: [(glow::VertexArray, glow::Buffer); 2],
+    /// Index buffer of the track layer (bound in its vertex array).
+    ebo: glow::Buffer,
     /// 1x1 white picture for untextured batches.
     white: glow::Texture,
 }
@@ -985,8 +995,13 @@ impl Scene {
                 Ok((vao, vbo))
             };
             let layers = [layer()?, layer()?];
+            let ebo = gl.create_buffer()?;
+            gl.bind_vertex_array(Some(layers[0].0));
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
             let white = Self::upload_texture(gl, 1, 1, &[255, 255, 255, 255])?;
-            Ok(GlObjects { program, layers, white })
+            Ok(GlObjects { program, layers, ebo, white })
         }
     }
 
@@ -1015,7 +1030,7 @@ impl Scene {
         Ok(t)
     }
 
-    fn paint(&mut self, gl: &glow::Context, mvp: &Mat, sel: f32, textured: bool) {
+    pub fn paint(&mut self, gl: &glow::Context, mvp: &Mat, sel: f32, textured: bool) {
         if self.failed {
             return;
         }
@@ -1046,8 +1061,16 @@ impl Scene {
                     Err(e) => eprintln!("texture {name}: {e}"),
                 }
             }
-            let track = self.pending.take().map(|(v, b)| {
+            let track = self.pending.take().map(|(v, ix, b)| {
                 self.batches = b;
+                self.indexed = !ix.is_empty();
+                if self.indexed {
+                    let bytes = std::slice::from_raw_parts(ix.as_ptr() as *const u8, ix.len() * 4);
+                    gl.bind_vertex_array(Some(o.layers[0].0));
+                    gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(o.ebo));
+                    gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+                    gl.bind_vertex_array(None);
+                }
                 v
             });
             for (k, pending) in [track, self.pending_objects.take()].into_iter().enumerate() {
@@ -1085,7 +1108,11 @@ impl Scene {
                 gl.bind_texture(glow::TEXTURE_2D, Some(*tex.unwrap_or(&o.white)));
                 gl.uniform_1_f32(u_textured.as_ref(), if tex.is_some() { 1.0 } else { 0.0 });
                 gl.uniform_1_f32(u_alpha.as_ref(), if tex.is_some() && b.alpha_test { 1.0 } else { 0.0 });
-                gl.draw_arrays(glow::TRIANGLES, b.first, b.count);
+                if self.indexed {
+                    gl.draw_elements(glow::TRIANGLES, b.count, glow::UNSIGNED_INT, b.first * 4);
+                } else {
+                    gl.draw_arrays(glow::TRIANGLES, b.first, b.count);
+                }
             }
             // The object markers: plain colours.
             if self.count_objects > 0 {

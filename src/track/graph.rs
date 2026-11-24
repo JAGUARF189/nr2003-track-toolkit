@@ -258,16 +258,22 @@ impl Graph {
 /// Where ptfjson.exe lives: next to this program, or the C++ build folder when running from
 /// a source checkout (target\release\ -> cpp\build\). TTK_PTFJSON overrides both.
 pub fn find_ptfjson() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("TTK_PTFJSON").map(PathBuf::from) {
+    find_tool("ptfjson.exe", "TTK_PTFJSON")
+}
+
+/// A C++ helper program (`name`): next to this program, or in the source checkout's C++ build
+/// folder. The environment variable `env` overrides both.
+pub fn find_tool(name: &str, env: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(env).map(PathBuf::from) {
         if p.is_file() {
             return Some(p);
         }
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let mut candidates = vec![dir.join("ptfjson.exe")];
+    let mut candidates = vec![dir.join(name)];
     for up in dir.ancestors().take(8) {
-        candidates.push(up.join("cpp").join("build").join("ptfjson.exe"));
+        candidates.push(up.join("cpp").join("build").join(name));
     }
     candidates.into_iter().find(|p| p.is_file())
 }
@@ -315,7 +321,7 @@ pub fn write_ptf_json(json: &str, dest: &Path) -> Result<()> {
 }
 
 /// Run ptfjson without a console window; Ok(stdout) or Err(its error message).
-fn run_ptfjson(tool: &Path, args: &[&std::ffi::OsStr]) -> std::result::Result<Vec<u8>, String> {
+pub(crate) fn run_ptfjson(tool: &Path, args: &[&std::ffi::OsStr]) -> std::result::Result<Vec<u8>, String> {
     let mut cmd = Command::new(tool);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
