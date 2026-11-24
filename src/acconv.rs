@@ -185,8 +185,9 @@ fn headings(cl: &Centerline) -> (Vec<f64>, f64) {
     let n = cl.len();
     let mut h = Vec::with_capacity(n + 1);
     let mut prev: Option<f64> = None;
+    // direction over 6 m (3 samples either side), steadier than neighbour to neighbour
     for i in 0..=n {
-        let (a, b) = (cl.pos[(i + n - 1) % n], cl.pos[(i + 1) % n]);
+        let (a, b) = (cl.pos[(i + n - 3) % n], cl.pos[(i + 3) % n]);
         let raw = (b[1] - a[1]).atan2(b[0] - a[0]);
         let v = match prev {
             Some(p) => p + (raw - p + PI).rem_euclid(TAU) - PI,
@@ -558,7 +559,7 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
     let n = cl.len();
     let (h, total) = headings(cl);
     if total.abs() < 1.0 {
-        bail!("the AI line doesn't go round a lap");
+        bail!("this track isn't a loop (it runs from one place to another); NR2003 tracks have to go round in a lap");
     }
     // a first fit of the heading within ~0.8°, then refine and split where it strays
     let mut knots = split_knots(&h, 0.8f64.to_radians());
@@ -567,6 +568,10 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
         let mut fit = Fit { knots: knots.clone(), straight, turn, h0: h[0], p0: cl.pos[0] };
         refine(&mut fit, cl, total, 30);
         let (worst, _, mean) = fit.worst(cl);
+        if std::env::var_os("TTK_ACCONV_DEBUG").is_some() {
+            let (_, at, _) = fit.worst(cl);
+            eprintln!("[acconv] round: {} pieces, worst {worst:.2} m at {:.0} m round the lap", fit.turn.len(), at as f64 * cl.ds);
+        }
         // split every piece whose own worst error is too big, at that worst sample
         let pieces = fit.pieces(cl.ds);
         let mut add = Vec::new();
@@ -584,7 +589,7 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
         }
         for (k, (e, i)) in piece_worst.iter().enumerate() {
             let (a, b) = (fit.knots[k], fit.knots[k + 1]);
-            if *e > tol_m && b - a >= 6 {
+            if *e > tol_m && b - a >= 4 {
                 // split near the worst point, but not right at the ends
                 add.push((*i).clamp(a + 2, b - 2));
             }
@@ -904,6 +909,8 @@ pub struct Report {
     pub offset: [f64; 2],
     /// Gap the fit left at the start/finish line, spread round the lap when writing (metres).
     pub closing_gap_m: f64,
+    /// AI points whose track edges were missing from AC's file and were measured or filled in.
+    pub edges_measured: usize,
     /// Pieces whose ground and walls came from AC (the rest: plain asphalt and grass).
     pub ac_ground_pieces: usize,
     /// Walls placed where AC has walls, and safety walls at the edge of the ground.
@@ -1349,18 +1356,108 @@ fn clip_inside(l: &mut Layout, inside: f64, limit: f64, wall_half: f64) {
     }
 }
 
+/// AC's AI points with the track edges filled in where the AI file has none (left + right = 0):
+/// measured by stepping sideways over AC's track surfaces (counting as track, not kerbs or
+/// grass), else interpolated from the nearest points that have them. Returns the points and
+/// how many were filled.
+fn fill_edges(scene: &AcScene, roads: &RoadHeights) -> (Vec<AcAiPoint>, usize) {
+    let mut ai = scene.ai.clone();
+    let n = ai.len();
+    // missing or not believable: an edge at 0 (one-sided data) or wider than 30 m
+    let bad = |p: &AcAiPoint| p.left <= 0.1 || p.right <= 0.1 || p.left > 30.0 || p.right > 30.0;
+    let missing: Vec<bool> = ai.iter().map(bad).collect();
+    let count = missing.iter().filter(|&&m| m).count();
+    if count == 0 || n < 3 {
+        return (ai, 0);
+    }
+    let road: Vec<bool> = scene.surfaces.iter().map(|sf| sf.valid && matches!(nr_surface(&sf.key, sf.valid), 1 | 2)).collect();
+    for k in 0..n {
+        if !missing[k] {
+            continue;
+        }
+        let (a, b) = (ai[(k + n - 1) % n].pos, ai[(k + 1) % n].pos);
+        let (dx, dy) = ((b[0] - a[0]) as f64, (b[1] - a[1]) as f64);
+        let len = dx.hypot(dy).max(1e-9);
+        let left = [-dy / len, dx / len];
+        let p = ai[k].pos;
+        let mut edge = [0.0f64; 2];
+        for (side, sign) in [(0usize, 1.0f64), (1, -1.0)] {
+            let mut z = p[2] as f64;
+            let mut d = 0.0;
+            let mut last = None;
+            let mut misses = 0;
+            while d < 40.0 {
+                let q = [p[0] as f64 + left[0] * sign * d, p[1] as f64 + left[1] * sign * d];
+                match roads.at_surface(q[0], q[1], z, 1.0) {
+                    Some((zz, sf)) if road.get(sf).copied().unwrap_or(false) => {
+                        z = zz;
+                        last = Some(d);
+                        misses = 0;
+                    }
+                    _ => {
+                        misses += 1;
+                        if misses > 2 && last.is_some() {
+                            break;
+                        }
+                    }
+                }
+                d += 0.25;
+            }
+            edge[side] = last.unwrap_or(0.0);
+        }
+        if edge[0] > 0.5 && edge[1] > 0.5 {
+            ai[k].left = edge[0] as f32;
+            ai[k].right = edge[1] as f32;
+        } else {
+            ai[k].left = 0.0;
+            ai[k].right = 0.0;
+        }
+    }
+    // still missing: interpolate between the nearest points that have edges
+    let known: Vec<usize> = (0..n).filter(|&k| !bad(&ai[k])).collect();
+    if !known.is_empty() {
+        for k in 0..n {
+            if !bad(&ai[k]) {
+                continue;
+            }
+            let after = known.iter().copied().find(|&j| j > k).unwrap_or(known[0] + n);
+            let before = known.iter().rev().copied().find(|&j| j < k).map_or(known[known.len() - 1] as isize - n as isize, |j| j as isize);
+            let span = (after as isize - before) as f32;
+            let f = (k as isize - before) as f32 / span.max(1.0);
+            let (pa, pb) = (ai[before.rem_euclid(n as isize) as usize], ai[after % n]);
+            ai[k].left = pa.left + (pb.left - pa.left) * f;
+            ai[k].right = pa.right + (pb.right - pa.right) * f;
+        }
+    }
+    (ai, count)
+}
+
 /// Convert an AC scene into an NR2003 track graph, using `template` (a stock .ptf graph) for
 /// the pieces' strips, walls and track settings.
 pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Converted> {
     let mut report = Report::default();
-    let cl = centerline(&scene.ai, 1.0)?;
+    // TTK_ACCONV_DEBUG=1 prints how long each stage takes
+    let debug = std::env::var_os("TTK_ACCONV_DEBUG").is_some();
+    let t0 = std::time::Instant::now();
+    let stage = |what: &str| {
+        if debug {
+            eprintln!("[acconv] {what}: {:.2}s", t0.elapsed().as_secs_f64());
+        }
+    };
+    // AC's AI file sometimes lacks the track edges for parts of the lap (ac_circuit_del_plan:
+    // 40%); there they're measured on AC's track surfaces, or interpolated
+    let roads = RoadHeights::new(scene);
+    let (ai, filled) = fill_edges(scene, &roads);
+    report.edges_measured = filled;
+    let cl = centerline(&ai, 1.0)?;
     report.length_ac = cl.length();
     let (mut pieces, worst, mean) = fit_plan(&cl, opt.position_m)?;
     report.worst_m = worst;
     report.mean_m = mean;
+    stage(&format!("plan fit, {} pieces, worst {worst:.2} m", pieces.len()));
 
     // --- heights and widths along the fitted track, every metre
-    let roads = RoadHeights::new(scene);
+    stage(&format!("road surface grid: {} triangles", roads.tris.len()));
     let n = cl.len();
     let ds = cl.ds;
     let mut prof = Profile { s: Vec::with_capacity(n), hc: Vec::new(), hr: Vec::new(), hl: Vec::new(), w: Vec::new() };
@@ -1392,6 +1489,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
         prof.w.push(cl.width[i]);
     }
     report.heights_found = found as f64 / (3 * n) as f64;
+    stage("road heights sampled");
     // smooth over a few metres (mesh facets)
     prof.hc = smooth_closed(&prof.hc, 2);
     prof.hr = smooth_closed(&prof.hr, 2);
@@ -1409,7 +1507,8 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     while i < pieces.len() {
         let pc = pieces[i].clone();
         let (a, b) = (sample(pc.s0), sample(pc.s0 + pc.len));
-        let b_idx = if b <= a { b + n } else { b };
+        let b_idx = a + ((pc.len / ds).round() as usize).max(1);
+        let _ = b;
         let mut bad: Option<(f64, usize)> = None;
         for (h, tol) in [(&prof.hc, opt.height_m), (&prof.hr, opt.height_m), (&prof.hl, opt.height_m), (&prof.w, opt.width_m)] {
             let is_width = std::ptr::eq(h, &prof.w);
@@ -1428,7 +1527,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
             }
         }
         // also: arcs over 90° are split (stock tracks never have them)
-        let over = (pc.h1 - pc.h0).abs() > 89f64.to_radians();
+        let over = (pc.h1 - pc.h0).abs() > 89f64.to_radians() && pc.len > 2.0 * ds;
         let cut = match bad {
             Some((_, j)) if b_idx - a >= 8 => Some((j.clamp(a + 3, b_idx - 3) - a) as f64 * ds),
             _ if over => Some(pc.len * 0.5),
@@ -1449,7 +1548,8 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     let mut sum_h = 0.0;
     for pc in &pieces {
         let (a, b) = (sample(pc.s0), sample(pc.s0 + pc.len));
-        let b_idx = if b <= a { b + n } else { b };
+        let b_idx = a + ((pc.len / ds).round() as usize).max(1);
+        let _ = b;
         let h = &prof.hc;
         let (m0, m1) = (slope_at(h, a, ds).clamp(-0.3, 0.3), slope_at(h, b % n, ds).clamp(-0.3, 0.3));
         for j in a..b_idx {
@@ -1462,6 +1562,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     report.worst_height_m = worst_h;
     report.mean_height_m = sum_h / n as f64;
 
+    stage(&format!("heights, {} pieces", pieces.len()));
     // --- room beside the road (so parallel stretches don't overlap)
     let max_side = if opt.ac_ground { opt.ground_m.max(opt.grass_m) } else { opt.grass_m };
     let (room_r, room_l) = room_beside(&cl, max_side);
@@ -1507,6 +1608,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
         }
     }
 
+    stage(&format!("ground layout splits, {} pieces", pieces.len()));
     // --- build the graph from the template
     let tpl = find_templates(template)?;
     let tpl_track = Track::from_graph(template)?;
@@ -1534,7 +1636,8 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     let mut room_piece = vec![[max_side; 2]; np]; // [right, left]
     for (k, pc) in pieces.iter().enumerate() {
         let (a, b) = (sample(pc.s0), sample(pc.s0 + pc.len));
-        let b_idx = if b <= a { b + n } else { b };
+        let b_idx = a + ((pc.len / ds).round() as usize).max(1);
+        let _ = b;
         let mut r = (a..=b_idx).map(|j| room_r[j % n]).fold(max_side, f64::min);
         let mut l = (a..=b_idx).map(|j| room_l[j % n]).fold(max_side, f64::min);
         if !pc.straight() {

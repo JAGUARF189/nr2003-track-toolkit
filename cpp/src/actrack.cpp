@@ -122,6 +122,29 @@ TrackFolder scan(const std::string& dirStr) {
         l.dataDir = fs::is_regular_file(dir / l.name / "data" / "surfaces.ini") ? (dir / l.name / "data").string() : (dir / "data").string();
         t.layouts.push_back(std::move(l));
     }
+    // Layouts AC lists under ui\<layout>\ui_track.json without a models_<layout>.ini use the
+    // track's own models (aa_bristol's bristol and dirt, aa_homestead's oval and road).
+    const std::vector<ModelRef> rootModels = t.layouts.empty() || !t.layouts.front().name.empty() ? std::vector<ModelRef>{} : t.layouts.front().models;
+    if (fs::is_directory(dir / "ui")) {
+        std::vector<std::string> names;
+        for (const auto& e : fs::directory_iterator(dir / "ui"))
+            if (e.is_directory() && fs::is_regular_file(e.path() / "ui_track.json")) names.push_back(e.path().filename().string());
+        std::sort(names.begin(), names.end());
+        for (const auto& name : names) {
+            if (std::any_of(t.layouts.begin(), t.layouts.end(), [&](const Layout& l) { return lower(l.name) == lower(name); })) continue;
+            if (rootModels.empty()) continue;
+            Layout l;
+            l.name = name;
+            l.title = jsonName(dir / "ui" / name / "ui_track.json");
+            l.models = rootModels;
+            l.aiDir = dirOf(name, "ai");
+            l.dataDir = fs::is_regular_file(dir / name / "data" / "surfaces.ini") ? (dir / name / "data").string() : (dir / "data").string();
+            t.layouts.push_back(std::move(l));
+        }
+    }
+    // With real layouts, the track's own (default) one is only kept if it has an AI line.
+    if (t.layouts.size() > 1 && t.layouts.front().name.empty() && !fs::is_regular_file(dir / "ai" / "fast_lane.ai"))
+        t.layouts.erase(t.layouts.begin());
     for (auto& l : t.layouts)
         if (l.title.empty()) l.title = l.name.empty() ? (t.title.empty() ? t.name : t.title) : l.name;
     if (t.layouts.empty()) throw std::runtime_error(dirStr + " has no models.ini or " + t.name + ".kn5, so it isn't an Assetto Corsa track folder");
