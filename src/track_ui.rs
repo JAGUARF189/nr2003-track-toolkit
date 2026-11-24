@@ -272,6 +272,13 @@ impl TrackView {
         self.cam_on_load = (dist, yaw, pitch);
     }
 
+    /// Open a track file, asking first if the current one has unsaved changes (another tab
+    /// sending a track here).
+    pub fn open_file(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        self.request_open(ctx, name, path);
+    }
+
     /// Start in Objects mode (command line `--objects`).
     pub fn objects_mode(&mut self) {
         self.mode = Mode::Objects;

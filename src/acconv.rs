@@ -648,6 +648,8 @@ pub struct Report {
     pub mean_height_m: f64,
     /// The checker's findings that would stop the track loading (should be none).
     pub crashes: Vec<String>,
+    /// Subtracted from AC's x, y to centre the NR2003 track (add it back to compare).
+    pub offset: [f64; 2],
     pub warnings: usize,
 }
 
@@ -973,6 +975,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
         }
     }
     let off = [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])];
+    report.offset = off;
     // Run-off width per side at every join between pieces: the room left beside both pieces
     // that meet there (and short of a turn's centre). Within a piece the width runs straight
     // from one join's value to the next, so it never goes past the room and walls don't step.

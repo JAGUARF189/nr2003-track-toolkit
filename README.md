@@ -131,7 +131,7 @@ ptfjson check <in.ptf>...          (re-encode and byte-compare)
   - Every test saves and reads the file back.
 - **Real clicks:** `re\gui_shot.ps1` refuses to send input if the PC was used in the last minute, or if anything but the toolkit is in front.
 
-## Assetto Corsa tracks (converting to NR2003, phase 1 of 5)
+## Assetto Corsa tracks (converting to NR2003, phases 1-2 of 5)
 
 The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views, with its textures.
 - **Finding tracks:** it finds AC through Steam's library list, or you can pick the `content\tracks` folder yourself.
@@ -150,9 +150,21 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
   - BC7-compressed textures; they show in plain colour.
   - AC's multi-layer road shaders, which show their main layer only.
   - Encrypted `.kn5` files, which are refused, and that's on purpose.
+- **Make NR2003 track** (phase 2) fits NR2003 straights and curves to the AC track and saves it as `tracks\<name>\<name>.ptf` in your Sandbox workspace, with the textures it uses.
+  - **What it follows:** AC's shape, width, hills and banking.
+  - **The steps:**
+    - **Centerline:** the middle between the track edges stored with AC's AI line, smoothed.
+    - **Shape:** a continuous fit of the direction around the lap gives exact straights and arcs. Least squares then adjusts every arc so the lap stays within 0.3 m of AC and closes exactly.
+    - **Height:** road heights come from AC's driving-surface meshes. Pieces are split wherever NR2003's per-piece height curve or width can't follow.
+    - **Ground and walls (for now):** plain asphalt, grass and a wall each side, copied from the template track (hillside), with the texture coordinates re-scaled. The grass stops halfway to any other stretch of the track, so parallel stretches never overlap.
+  - **Results:**
+    - Mugello: 190 pieces, within 0.22 m of AC (0.04 m on average), road height within 0.09 m.
+    - Monaco F1 2026: 257 pieces, within 0.11 m.
+    - Both pass the checker, and each takes about 1 s.
+  - **After converting:** **Look at it** opens the result in the Look at a track tab, and an orange line shows it over the AC track. To try it in NR2003, use Build track with the same name.
+  - **Command line:** `cargo run --release --example acconvert -- <AC folder> <layout|-> <template folder> <out folder> <name>`. `examples\acplot.rs` draws a top-down comparison picture.
 - **Next phases:**
-  2. Fit the NR2003 centerline to the AI line and write a drivable `.ptf`.
-  3. Ground strips and walls from AC's surfaces.
+  3. Ground strips (kerbs, grass, sand, run-off) and walls from AC's surfaces.
   4. Scenery and textures as `.3do`/`.mip`.
   5. AI lines, cameras and pit stalls.
 

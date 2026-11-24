@@ -8,6 +8,7 @@ use eframe::egui_glow;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use ttk::ac::{self, AcInfo, AcScene, ViewOptions};
+use ttk::acconv;
 use ttk::config::Settings;
 use ttk::track::mesh::TrackMesh;
 
@@ -19,6 +20,17 @@ struct Loaded {
     scene: AcScene,
     mesh: TrackMesh,
     summary: String,
+    /// AC folder and layout it came from (for converting).
+    dir: PathBuf,
+    layout: String,
+}
+
+/// A finished conversion.
+struct Made {
+    report: acconv::Report,
+    written: acconv::Written,
+    /// The NR2003 centerline in AC coordinates, to draw over the AC track.
+    line: Vec<[f32; 3]>,
 }
 
 pub struct AcView {
@@ -42,6 +54,14 @@ pub struct AcView {
     scene: Arc<Mutex<Scene>>,
     /// Folder/track/layout given on the command line, opened on the first frame.
     open_on_start: Option<(PathBuf, String)>,
+    /// Name of the NR2003 track to make.
+    nr_name: String,
+    making: Option<mpsc::Receiver<Result<Made, String>>>,
+    made: Option<Made>,
+    make_error: Option<String>,
+    show_nr: bool,
+    /// A track file for the Track tab to open (after "Look at it").
+    open_request: Option<PathBuf>,
 }
 
 impl Default for AcView {
@@ -66,6 +86,12 @@ impl Default for AcView {
             fit_pending: false,
             scene: Arc::new(Mutex::new(Scene::default())),
             open_on_start: None,
+            nr_name: String::new(),
+            making: None,
+            made: None,
+            make_error: None,
+            show_nr: true,
+            open_request: None,
         }
     }
 }
@@ -105,6 +131,11 @@ impl AcView {
         let Some(layout) = info.layouts.get(self.layout).cloned() else { return };
         let title = if info.layouts.len() > 1 { format!("{} — {}", info.title, layout.title) } else { info.title.clone() };
         let opts = self.opts;
+        // a name for the NR2003 track: folder (+ layout), letters/digits/_ only
+        let raw = if layout.name.is_empty() { format!("{}_ac", info.name) } else { format!("{}_ac", layout.name) };
+        self.nr_name = raw.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c.to_ascii_lowercase() } else { '_' }).collect();
+        self.made = None;
+        self.make_error = None;
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
@@ -122,13 +153,168 @@ impl AcView {
                     scene.triangles() as f64 / 1e6,
                     scene.textures.len()
                 );
-                Ok(Loaded { title, scene, mesh, summary })
+                Ok(Loaded { title, scene, mesh, summary, dir, layout: layout.name.clone() })
             })();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
         });
         self.loading = Some(rx);
         self.error = None;
+    }
+
+    /// "Look at it": a converted track for the Track tab to open.
+    pub fn take_open_request(&mut self) -> Option<PathBuf> {
+        self.open_request.take()
+    }
+
+    fn make_track(&mut self, ctx: &egui::Context, settings: &Settings) {
+        let Some(l) = &self.loaded else { return };
+        let name = self.nr_name.trim().to_string();
+        if let Err(e) = ttk::steps::validate_track_name(&name) {
+            self.make_error = Some(format!("{e:#}"));
+            return;
+        }
+        let (dir, layout) = (l.dir.clone(), l.layout.clone());
+        let template_dir = settings.game_tracks().join(settings.template_track.trim());
+        let out = settings.workspace_dir.join(&name);
+        let (tx, rx) = mpsc::channel();
+        let ctx2 = ctx.clone();
+        std::thread::spawn(move || {
+            let r = (|| -> anyhow::Result<Made> {
+                let tpl_file = ttk::track::graph::track_file_in(&template_dir)
+                    .ok_or_else(|| anyhow::anyhow!("the template track ({}) has no .ptf or .dat", template_dir.display()))?;
+                let (bytes, _) = ttk::track::graph::load_ptf_bytes(&tpl_file)?;
+                let template = ttk::track::graph::parse_ptf(&bytes)?;
+                let tmp = std::env::temp_dir().join(format!("ttk_acconv_{}.acscene", std::process::id()));
+                ac::export_scene(&dir, &layout, &tmp, 0)?;
+                let scene = AcScene::read(&tmp, 0);
+                let _ = std::fs::remove_file(&tmp);
+                let c = acconv::convert(&scene?, &template, &acconv::Options::default())?;
+                let written = acconv::write_track(&c, &out, &name, &template_dir)?;
+                let t = ttk::track::model::Track::from_graph(&c.graph)?;
+                let off = c.report.offset;
+                let mut line = Vec::new();
+                for s in &t.segments {
+                    let n = ((s.length / 4.0).ceil() as usize).max(1);
+                    for k in 0..n {
+                        let p = s.point(k as f64 / n as f64, 0.0);
+                        line.push([(p[0] + off[0]) as f32, (p[1] + off[1]) as f32, 0.0]);
+                    }
+                }
+                Ok(Made { report: c.report, written, line })
+            })();
+            let _ = tx.send(r.map_err(|e| format!("{e:#}")));
+            ctx2.request_repaint();
+        });
+        self.making = Some(rx);
+        self.make_error = None;
+        self.made = None;
+    }
+
+    fn poll_make(&mut self) {
+        let Some(rx) = &self.making else { return };
+        match rx.try_recv() {
+            Ok(Ok(mut m)) => {
+                // put the NR2003 centerline at the AC road's height for the 3D view
+                if let Some(l) = &self.loaded {
+                    let ai = &l.scene.ai;
+                    for p in &mut m.line {
+                        let near = ai.iter().min_by(|a, b| {
+                            let da = (a.pos[0] - p[0]).powi(2) + (a.pos[1] - p[1]).powi(2);
+                            let db = (b.pos[0] - p[0]).powi(2) + (b.pos[1] - p[1]).powi(2);
+                            da.total_cmp(&db)
+                        });
+                        p[2] = near.map_or(0.0, |a| a.pos[2]);
+                    }
+                }
+                self.made = Some(m);
+                self.making = None;
+            }
+            Ok(Err(e)) => {
+                self.make_error = Some(e);
+                self.making = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.make_error = Some("making the track stopped unexpectedly".into());
+                self.making = None;
+            }
+        }
+    }
+
+    /// The "Make an NR2003 track" section.
+    fn make_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, settings: &Settings) {
+        ui.separator();
+        ui.label(RichText::new("Make an NR2003 track").strong().size(15.0));
+        ui.label("Fits NR2003 straights and curves to this track (its shape, width, hills and banking) and saves it in your Sandbox workspace.");
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut self.nr_name).desired_width(200.0));
+        });
+        let dest = settings.workspace_dir.join(self.nr_name.trim()).join(format!("{}.ptf", self.nr_name.trim()));
+        ui.label(RichText::new(format!("Saves to {}", dest.display())).weak());
+        if dest.is_file() {
+            ui.label(RichText::new("A track with this name is already there. It's backed up before it's replaced.").color(Color32::from_rgb(240, 190, 80)));
+        }
+        let go = egui::Button::new(RichText::new("Make NR2003 track").size(15.0).strong());
+        if ui.add_enabled(self.making.is_none() && !self.nr_name.trim().is_empty(), go).clicked() {
+            self.make_track(ctx, settings);
+        }
+        if self.making.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Fitting the track…");
+            });
+        }
+        if let Some(e) = &self.make_error {
+            ui.colored_label(Color32::from_rgb(230, 90, 80), e);
+        }
+        let Some(m) = &self.made else { return };
+        let r = &m.report;
+        let good = r.crashes.is_empty();
+        ui.colored_label(
+            if good { Color32::from_rgb(120, 200, 120) } else { Color32::from_rgb(235, 95, 85) },
+            if good { "Done. The track passes the checker." } else { "Made, but the checker found problems that will stop it loading:" },
+        );
+        for c in r.crashes.iter().take(5) {
+            ui.colored_label(Color32::from_rgb(235, 95, 85), c);
+        }
+        egui::Grid::new("ac_made").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+            ui.label("Pieces");
+            ui.label(format!("{} ({} straight, {} curved)", r.pieces, r.straights, r.curves));
+            ui.end_row();
+            ui.label("Follows AC");
+            ui.label(format!("within {:.2} m ({:.2} m on average)", r.worst_m, r.mean_m));
+            ui.end_row();
+            ui.label("Road height");
+            ui.label(format!("within {:.2} m ({:.0}% measured on AC's road)", r.worst_height_m, r.heights_found * 100.0));
+            ui.end_row();
+            ui.label("Lap");
+            ui.label(format!("{:.0} m", r.length_nr));
+            ui.end_row();
+            if r.warnings > 0 {
+                ui.label("Warnings");
+                ui.label(format!("{} (see Check in Look at a track)", r.warnings));
+                ui.end_row();
+            }
+        });
+        ui.label(RichText::new(format!("Saved {}", m.written.ptf.display())).weak());
+        if !m.written.missing.is_empty() {
+            ui.colored_label(Color32::from_rgb(240, 190, 80), format!("Textures not found in the template: {}", m.written.missing.join(", ")));
+        }
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("Look at it").strong()).clicked() {
+                self.open_request = Some(m.written.ptf.clone());
+            }
+            ui.checkbox(&mut self.show_nr, "Show it over the AC track (orange)");
+        });
+        ui.label(
+            RichText::new(
+                "For now the ground is plain asphalt with grass and a wall on each side. AC's own kerbs, run-off and walls, \
+                 scenery, AI lines and pit stalls come in the next phases. To try it in NR2003, use Build track with this name.",
+            )
+            .weak(),
+        );
     }
 
     fn poll(&mut self) {
@@ -228,6 +414,7 @@ impl AcView {
             }
         }
         self.poll();
+        self.poll_make();
         egui::SidePanel::left("ac_side").resizable(true).default_width(370.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.side_panel(ui, ctx, settings));
         });
@@ -382,6 +569,7 @@ impl AcView {
         if changed {
             self.rebuild();
         }
+        self.make_panel(ui, ctx, settings);
 
         // Driving surfaces, in plain words
         let Some(l) = &self.loaded else { return };
@@ -478,6 +666,14 @@ impl AcView {
                 painter.text(q - egui::vec2(0.0, 8.0), egui::Align2::CENTER_BOTTOM, "Start / finish", egui::FontId::proportional(13.0), Color32::WHITE);
             }
         }
+        if let Some(m) = self.made.as_ref().filter(|_| self.show_nr) {
+            let pts: Vec<Option<egui::Pos2>> = m.line.iter().map(|p| to_screen(*p)).collect();
+            for k in 0..pts.len() {
+                if let (Some(a), Some(b)) = (pts[k], pts[(k + 1) % pts.len()]) {
+                    painter.line_segment([a, b], egui::Stroke::new(2.0f32, Color32::from_rgb(255, 150, 40)));
+                }
+            }
+        }
         if self.show_markers {
             for m in &s.markers {
                 let n = m.name.to_ascii_uppercase();
@@ -501,3 +697,7 @@ impl AcView {
         painter.text(rect.left_top() + egui::vec2(10.0, 8.0), egui::Align2::LEFT_TOP, hint, egui::FontId::proportional(13.0), Color32::from_gray(235));
     }
 }
+
+#[cfg(test)]
+#[path = "ac_ui_tests.rs"]
+mod ui_tests;

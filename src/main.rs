@@ -558,6 +558,10 @@ impl eframe::App for App {
             self.textures.show(ctx, &env);
         } else if self.tab == Tab::Ac {
             self.ac_view.show(ctx, &mut self.settings);
+            if let Some(p) = self.ac_view.take_open_request() {
+                self.tab = Tab::Track;
+                self.track_view.open_file(ctx, p);
+            }
         } else if self.tab == Tab::Track {
             let folders: Vec<(String, PathBuf)> = self
                 .game_tracks
