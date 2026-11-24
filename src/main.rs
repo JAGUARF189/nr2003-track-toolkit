@@ -35,7 +35,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             let mut app = App::new();
-            // `track-toolkit.exe <track.ptf|.dat> [--3d] [--piece N] [--objects]` opens straight into the Track tab.
+            // `track-toolkit.exe <track.ptf|.dat> [--3d] [--piece N] [--wall N | --strip N] [--objects]` opens straight into the Track tab.
             let args: Vec<String> = std::env::args().skip(1).collect();
             if let Some(file) = args.iter().find(|a| {
                 let l = a.to_ascii_lowercase();
@@ -51,6 +51,15 @@ fn main() -> eframe::Result<()> {
                 app.track_view.open_path(&cc.egui_ctx, PathBuf::from(file), args.iter().any(|a| a == "--3d"), piece);
                 if args.iter().any(|a| a == "--objects") {
                     app.track_view.objects_mode();
+                }
+                // --wall N / --strip N: pick the Nth wall or ground strip (right to left) of --piece
+                let num = |flag: &str| {
+                    args.iter().position(|a| a == flag).and_then(|k| args.get(k + 1)).and_then(|n| n.parse::<usize>().ok())
+                };
+                if let Some(n) = num("--wall") {
+                    app.track_view.pick_on_load(true, n);
+                } else if let Some(n) = num("--strip") {
+                    app.track_view.pick_on_load(false, n);
                 }
             }
             Ok(Box::new(app))

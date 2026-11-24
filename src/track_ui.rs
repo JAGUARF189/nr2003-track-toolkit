@@ -12,6 +12,7 @@ use ttk::config::Settings;
 
 mod editor;
 mod objects_ui;
+mod parts;
 mod saving;
 
 use ttk::track::check::Problem;
@@ -100,6 +101,17 @@ pub struct TrackView {
     /// The shape changed since loading (AI lines, cameras and stalls need redoing).
     layout_changed: bool,
     mode: Mode,
+    /// The wall or ground strip picked on the selected piece (graph id).
+    part: Option<i32>,
+    /// "Copy to pieces A to B" (1-based piece numbers).
+    copy_to: (usize, usize),
+    /// The part `copy_to` was suggested for.
+    copy_for: Option<i32>,
+    part_note: Option<String>,
+    /// Scroll the side panel to the wall/strip editor (after picking one on the map).
+    scroll_part: bool,
+    /// Wall (true) or strip number to pick once loaded (command line).
+    part_on_load: Option<(bool, usize)>,
     /// Selected placed objects (graph ids), in the order picked.
     obj_sel: Vec<i32>,
     /// Locked objects can't be picked on the map.
@@ -141,6 +153,12 @@ impl Default for TrackView {
             edit_error: None,
             layout_changed: false,
             mode: Mode::Pieces,
+            part: None,
+            copy_to: (1, 1),
+            copy_for: None,
+            part_note: None,
+            scroll_part: false,
+            part_on_load: None,
             obj_sel: Vec::new(),
             locked: HashSet::new(),
             obj_drag: None,
@@ -205,6 +223,11 @@ impl TrackView {
         self.open(ctx, name, path, None);
     }
 
+    /// Pick wall (or ground strip) number `n`, right to left, of the piece chosen with `--piece`.
+    pub fn pick_on_load(&mut self, wall: bool, n: usize) {
+        self.part_on_load = Some((wall, n));
+    }
+
     /// Start in Objects mode (command line `--objects`).
     pub fn objects_mode(&mut self) {
         self.mode = Mode::Objects;
@@ -219,6 +242,8 @@ impl TrackView {
                 let restored = l.restored;
                 self.locked = l.save_path.as_deref().map(|p| ttk::track::objects::load_locks(p, &l.track)).unwrap_or_default();
                 self.obj_sel.clear();
+                self.part = None;
+                self.part_note = None;
                 self.obj_drag = None;
                 self.obj_cycle = None;
                 self.obj_note = None;
@@ -413,7 +438,11 @@ impl TrackView {
         if let Some(k) = self.selected {
             if self.loaded.as_ref().is_some_and(|l| k < l.track.segments.len()) {
                 ui.separator();
-                self.piece_editor(ui, k);
+                // Its own scroll area, so the list of pieces below stays in view.
+                let h = (ui.available_height() * 0.62).max(160.0);
+                egui::ScrollArea::vertical().id_salt("piece_edit_scroll").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
+                    self.piece_editor(ui, k);
+                });
             }
         }
 
@@ -445,6 +474,10 @@ impl TrackView {
         }
         self.scroll_list = false;
         if let Some(k) = clicked {
+            if self.selected != Some(k) {
+                self.part = None;
+                self.part_note = None;
+            }
             self.selected = Some(k);
             self.focus_segment(k);
         }
@@ -464,6 +497,17 @@ impl TrackView {
                 self.selected = Some(k);
                 self.scroll_list = true;
                 self.focus_segment(k);
+                if let (Some((wall, i)), Some(l)) = (self.part_on_load.take(), &self.loaded) {
+                    let s = &l.track.segments[k];
+                    let mut ids: Vec<(f64, i32)> = if wall {
+                        s.ws.iter().map(|w| (w.dlat[0] + w.dlat[1], w.id)).collect()
+                    } else {
+                        s.fs.iter().map(|f| (f.dlat[0] + f.dlat[1], f.id)).collect()
+                    };
+                    ids.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    self.part = i.checked_sub(1).and_then(|i| ids.get(i)).map(|x| x.1);
+                    self.scroll_part = self.part.is_some();
+                }
             }
         }
         if self.mode == Mode::Objects && self.view == View::Map {
@@ -518,7 +562,14 @@ impl TrackView {
                     if let Some(p) = resp.interact_pointer_pos() {
                         let wx = self.cam.cx + (p.x - rect.center().x) as f64 * mpp + l.mesh.origin[0];
                         let wy = self.cam.cy - (p.y - rect.center().y) as f64 * mpp + l.mesh.origin[1];
+                        let before = self.selected;
                         self.selected = pick(&l.mesh, &l.track, wx, wy);
+                        let picked = self.selected.and_then(|k| parts::pick_part(&l.track.segments[k], wx, wy, (6.0 * mpp).max(0.3)));
+                        if picked.is_some() || self.selected != before {
+                            self.part = picked;
+                            self.part_note = None;
+                            self.scroll_part = picked.is_some();
+                        }
                         self.scroll_list = true;
                     }
                 }
@@ -589,11 +640,19 @@ impl TrackView {
                 }
             }
         }
+        if let (Mode::Pieces, Some(k), Some(id)) = (self.mode, self.selected, self.part) {
+            if let Some(s) = l.track.segments.get(k) {
+                let pts: Vec<egui::Pos2> = parts::part_outline(s, id).iter().filter_map(|p| to_screen(p[0], p[1], p[2])).collect();
+                if pts.len() > 2 {
+                    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.5f32, Color32::from_rgb(80, 200, 255))));
+                }
+            }
+        }
         if self.view == View::Map && self.show_objects {
             self.objects_overlay(&painter, rect);
         }
         let hint = match (self.view, self.mode) {
-            (View::Map, Mode::Pieces) => "Drag to move  ·  Scroll to zoom  ·  Click a piece of track to select it",
+            (View::Map, Mode::Pieces) => "Drag to move  ·  Scroll to zoom  ·  Click the track to pick a piece and the wall or ground there",
             (View::Map, Mode::Objects) => {
                 "Click an object to select it (click again for the one under it)  ·  Ctrl+click adds  ·  Drag a box around several\n\
                  Drag them to move  ·  Drag the round handle to turn  ·  Right-drag to move the map  ·  Scroll to zoom"

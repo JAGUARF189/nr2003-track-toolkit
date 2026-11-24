@@ -8,3 +8,4 @@ pub mod mesh;
 pub mod model;
 pub mod objects;
 pub mod save;
+pub mod surface;

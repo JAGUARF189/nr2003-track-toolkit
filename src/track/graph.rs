@@ -48,6 +48,31 @@ impl Node {
     pub fn s(&self, name: &str) -> Option<&str> {
         self.get(name).and_then(Value::as_str)
     }
+    /// The ids in list field `stem` (`stem_count`, then `stem[0..n]`).
+    pub fn list_ids(&self, stem: &str) -> Vec<i32> {
+        (0..self.i(&format!("{stem}_count")).max(0)).filter_map(|k| self.r(&format!("{stem}[{k}]"))).collect()
+    }
+
+    /// A copy with list field `stem` replaced by `ids`: `stem_count`, then (if any)
+    /// `stem_size` (4 bytes per entry) and `stem[0..n]`, which is how the writer lays out lists.
+    pub fn with_list(&self, stem: &str, ids: &[i32]) -> Result<Node> {
+        let mut n = self.clone();
+        let count = format!("{stem}_count");
+        let at = n.fields.iter().position(|f| f.0 == count).with_context(|| format!("{} has no {stem} list", self.class))?;
+        let (size, item) = (format!("{stem}_size"), format!("{stem}["));
+        n.fields.retain(|f| f.0 != size && !f.0.starts_with(&item));
+        n.fields[at].2 = Value::from(ids.len());
+        let mut list = Vec::new();
+        if !ids.is_empty() {
+            list.push((size, "size".to_string(), Value::from(ids.len() * 4)));
+            for (k, id) in ids.iter().enumerate() {
+                list.push((format!("{stem}[{k}]"), "obj".to_string(), Value::from(*id)));
+            }
+        }
+        n.fields.splice(at + 1..at + 1, list);
+        Ok(n)
+    }
+
     /// Change a field's value; returns the old value. Fails if the field doesn't exist.
     pub fn set(&mut self, name: &str, v: Value) -> Result<Value> {
         let class = self.class.clone();

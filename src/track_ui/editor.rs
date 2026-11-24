@@ -155,9 +155,7 @@ impl TrackView {
         if let Some(e) = &self.edit_error {
             ui.colored_label(Color32::from_rgb(230, 90, 80), e);
         }
-        if let Some(l) = &self.loaded {
-            piece_info(ui, &l.track.segments[k]);
-        }
+        self.parts_panel(ui, k);
     }
 
     /// The checker: problems that stop the track loading, then warnings. Click one to go there.
@@ -205,43 +203,6 @@ impl TrackView {
                 )
                 .weak(),
             );
-        }
-    }
-}
-
-/// Read-only facts below the editor: ground strips and walls.
-pub(super) fn piece_info(ui: &mut egui::Ui, s: &model::Segment) {
-    let strips = s.strips(0.5);
-    if !strips.is_empty() {
-        ui.label(RichText::new("Ground, right to left").weak());
-        let mut merged: Vec<(i64, f64)> = Vec::new();
-        for (a, b, surf) in strips {
-            match merged.last_mut() {
-                Some(last) if last.0 == surf => last.1 += b - a,
-                _ => merged.push((surf, b - a)),
-            }
-        }
-        let line = merged
-            .iter()
-            .map(|(surf, w)| format!("{} {:.1} m", surface_name(*surf), w))
-            .collect::<Vec<_>>()
-            .join(",  ");
-        ui.label(line);
-    }
-    if !s.ws.is_empty() {
-        ui.label(RichText::new("Walls").weak());
-        let mut ws: Vec<_> = s.ws.iter().collect();
-        ws.sort_by(|a, b| a.dlat[0].total_cmp(&b.dlat[0]));
-        for w in ws {
-            let d = 0.5 * (w.dlat[0] + w.dlat[1]);
-            let side = if d < 0.0 { "right" } else { "left" };
-            ui.label(format!(
-                "{}  —  {:.1} m to the {side}, {:.2} m tall",
-                wall_name(w.wall_type),
-                d.abs(),
-                0.5 * (w.height[0] + w.height[1])
-            ))
-            .on_hover_text(format!("Sandbox wall type {}", w.wall_type));
         }
     }
 }

@@ -83,29 +83,11 @@ fn new_tsoref(id: i32, tso: i32, o: &NewObject) -> Node {
 
 /// The placements in the root's list, in order.
 pub fn tsoref_ids(g: &Graph) -> Vec<i32> {
-    let root = g.root();
-    (0..root.i("tsoref_count").max(0)).filter_map(|k| root.r(&format!("tsoref[{k}]"))).collect()
-}
-
-/// The root with its placement list replaced by `ids`.
-fn root_with(g: &Graph, ids: &[i32]) -> Result<Node> {
-    let mut root = g.root().clone();
-    let at = root.fields.iter().position(|f| f.0 == "tsoref_count").context("the track has no object list")?;
-    root.fields.retain(|f| f.0 != "tsoref_size" && !f.0.starts_with("tsoref["));
-    root.fields[at].2 = json!(ids.len());
-    let mut list = Vec::new();
-    if !ids.is_empty() {
-        list.push(field("tsoref_size", "size", json!(ids.len() * 4)));
-        for (k, id) in ids.iter().enumerate() {
-            list.push(field(&format!("tsoref[{k}]"), "obj", json!(id)));
-        }
-    }
-    root.fields.splice(at + 1..at + 1, list);
-    Ok(root)
+    g.root().list_ids("tsoref")
 }
 
 fn root_edit(g: &Graph, ids: &[i32]) -> Result<NodeEdit> {
-    Ok(NodeEdit { id: g.root, before: Some(g.root().clone()), after: Some(root_with(g, ids)?) })
+    Ok(NodeEdit { id: g.root, before: Some(g.root().clone()), after: Some(g.root().with_list("tsoref", ids)?) })
 }
 
 /// The TSO already naming `file` (any case), if there is one.

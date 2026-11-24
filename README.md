@@ -24,7 +24,7 @@ The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file
 - **3D:** drag to turn, right-drag to move, scroll to zoom.
 - **Pieces list:** every straight and curve, with length, turn angle, radius and banking. The selected piece also shows its height, the ground across it (right to left) and its walls in plain words.
 
-`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N] [--objects]` opens straight into this tab.
+`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N] [--wall N | --strip N] [--objects]` opens straight into this tab. `--wall`/`--strip` pick the Nth wall or ground strip, counting right to left, of that piece.
 
 ### Editing the shape (phase 3)
 
@@ -48,6 +48,28 @@ Select a piece (in the list or on the map) to edit it:
   - Steep road (over 10% grade), and ground strips or walls off the edge of the ground.
   - Texture/object files that can't be found.
 - **Calibration:** all 47 installed game tracks give no "won't load" findings.
+
+### Walls, ground and textures (phase 5)
+
+Click the track on the map: that picks the piece and the wall or ground strip under the mouse, outlined in blue. You can also pick from the lists under the piece editor.
+- **Wall:**
+  - **Type:** in plain words (hard wall, tire wall, fence…).
+  - **Where:** distance from the centre line at the start and end. Type e.g. `12 left` or `8.5 right`.
+  - **Height** and **Thickness**.
+  - **Texture.**
+  - **Add a wall on the right / on the left:** copies the nearest wall on that side onto the outer edge of the ground. **Delete this wall** removes one.
+- **Ground strip:**
+  - **Surface:** asphalt, concrete, grass, sand…
+  - **Right edge:** where the strip starts. It can't pass the strips beside it.
+  - **Texture.**
+  - **Split in two** makes two strips side by side, so half can be changed. **Remove** lets the strip to the right fill the gap.
+- **Textures:**
+  - **Picking:** choose any texture the track already uses, or **Another .mip file…**, which copies the file into the track's `trackmat` folder and never overwrites anything.
+  - **Only this wall or strip changes:** each face has its own texture settings, and the texture files stay shared.
+- **Copy to pieces A to B:**
+  - **A wall** gives the wall on the same side of each of those pieces its type, height, thickness and texture.
+  - **A strip** gives the strip in the same place its surface and texture.
+- **Order:** every installed track lists strips and walls right to left. New and moved ones keep that order.
 
 ### Objects (phase 4)
 
