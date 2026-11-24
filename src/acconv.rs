@@ -44,11 +44,20 @@ pub struct Options {
     pub ac_ground: bool,
     /// How far beside the road AC's ground is followed at most (metres).
     pub ground_m: f64,
+    /// Pieces at least this long are split where AC's ground changes along them (metres).
+    pub min_split_m: f64,
+}
+
+impl Options {
+    /// Follows AC a little less closely, for far fewer pieces.
+    pub fn fewer_pieces() -> Self {
+        Self { position_m: 0.6, height_m: 0.2, width_m: 0.6, min_split_m: 30.0, ..Self::default() }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { position_m: 0.3, height_m: 0.1, width_m: 0.3, grass_m: 12.0, walls: true, ac_ground: true, ground_m: 30.0 }
+        Self { position_m: 0.3, height_m: 0.1, width_m: 0.3, grass_m: 12.0, walls: true, ac_ground: true, ground_m: 30.0, min_split_m: 12.0 }
     }
 }
 
@@ -1588,7 +1597,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
         let mut i = 0;
         while i < pieces.len() {
             let pc = pieces[i].clone();
-            if pc.len >= 12.0 {
+            if pc.len >= opt.min_split_m {
                 let seq = |t: f64| {
                     let j = sample(pc.s0 + pc.len * t);
                     surfaces_of(&runs(&look_across(&pc, t, limit_at(j), z_at(j), &roads, &walls_ac, &nr, step)))

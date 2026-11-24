@@ -60,6 +60,8 @@ pub struct AcView {
     made: Option<Made>,
     make_error: Option<String>,
     show_nr: bool,
+    /// Convert with a looser fit (fewer pieces).
+    fewer: bool,
     /// A track file for the Track tab to open (after "Look at it").
     open_request: Option<PathBuf>,
 }
@@ -91,6 +93,7 @@ impl Default for AcView {
             made: None,
             make_error: None,
             show_nr: true,
+            fewer: false,
             open_request: None,
         }
     }
@@ -177,6 +180,7 @@ impl AcView {
         let (dir, layout) = (l.dir.clone(), l.layout.clone());
         let template_dir = ac_template_dir(settings);
         let out = settings.workspace_dir.join(&name);
+        let options = if self.fewer { acconv::Options::fewer_pieces() } else { acconv::Options::default() };
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
@@ -189,7 +193,7 @@ impl AcView {
                 ac::export_scene(&dir, &layout, &tmp, 0)?;
                 let scene = AcScene::read(&tmp, 0);
                 let _ = std::fs::remove_file(&tmp);
-                let c = acconv::convert(&scene?, &template, &acconv::Options::default())?;
+                let c = acconv::convert(&scene?, &template, &options)?;
                 let written = acconv::write_track(&c, &out, &name, &template_dir)?;
                 let t = ttk::track::model::Track::from_graph(&c.graph)?;
                 let off = c.report.offset;
@@ -273,6 +277,9 @@ impl AcView {
         if dest.is_file() {
             ui.label(RichText::new("A track with this name is already there. It's backed up before it's replaced.").color(Color32::from_rgb(240, 190, 80)));
         }
+        ui.checkbox(&mut self.fewer, "Fewer pieces").on_hover_text(
+            "Follows AC a little less closely (within 0.6 m instead of 0.3 m) for far fewer pieces.              Try it if a big track has more pieces than NR2003 likes.",
+        );
         let go = egui::Button::new(RichText::new("Make NR2003 track").size(15.0).strong());
         if ui.add_enabled(self.making.is_none() && !self.nr_name.trim().is_empty(), go).clicked() {
             self.make_track(ctx, settings);
@@ -330,6 +337,21 @@ impl AcView {
                 ui.end_row();
             }
         });
+        if r.pieces > 660 {
+            ui.colored_label(
+                Color32::from_rgb(240, 190, 80),
+                format!(
+                    "This track has {} pieces. The most in any track you have installed is 660 (Circuit Of The Americas),                      so NR2003 hasn't been seen handling this many. If it won't load, make it again with Fewer pieces.",
+                    r.pieces
+                ),
+            );
+        }
+        if r.edges_measured > 0 {
+            ui.label(RichText::new(format!(
+                "AC's AI file had no usable track edges at {} points; they were measured on AC's road instead.",
+                r.edges_measured
+            )).weak());
+        }
         ui.label(RichText::new(format!("Saved {}", m.written.ptf.display())).weak());
         if !m.written.missing.is_empty() {
             ui.colored_label(Color32::from_rgb(240, 190, 80), format!("Textures not found in the template: {}", m.written.missing.join(", ")));

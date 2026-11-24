@@ -1,5 +1,5 @@
 //! Convert an Assetto Corsa track to an NR2003 .ptf from the command line:
-//! cargo run --release --example acconvert -- <AC track folder> <layout|-> <template track folder> <out folder> <name>
+//! cargo run --release --example acconvert -- <AC track folder> <layout|-> <template track folder> <out folder> <name> [--fewer]
 use std::path::PathBuf;
 use ttk::{ac, acconv, track};
 
@@ -14,7 +14,8 @@ fn main() -> anyhow::Result<()> {
     let tpl_file = track::graph::track_file_in(&tpl_dir).ok_or_else(|| anyhow::anyhow!("no .ptf or .dat in {}", tpl_dir.display()))?;
     let (bytes, _) = track::graph::load_ptf_bytes(&tpl_file)?;
     let template = track::graph::parse_ptf(&bytes)?;
-    let c = acconv::convert(&scene, &template, &acconv::Options::default())?;
+    let opt = if a.iter().any(|x| x == "--fewer") { acconv::Options::fewer_pieces() } else { acconv::Options::default() };
+    let c = acconv::convert(&scene, &template, &opt)?;
     println!("{:#?}", c.report);
     let w = acconv::write_track(&c, &out, name, &tpl_dir)?;
     println!("wrote {} ({} textures copied, missing {:?})", w.ptf.display(), w.copied.len(), w.missing);
