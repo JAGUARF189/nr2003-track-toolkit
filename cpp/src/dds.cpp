@@ -1,5 +1,7 @@
 #include "dds.hpp"
 
+#include "bc7.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -18,6 +20,7 @@ constexpr std::uint32_t kAlphaPixels = 0x1, kAlpha = 0x2, kFourCC = 0x4, kRgb = 
 struct Header {
     std::uint32_t width, height, mips, pfFlags, fourCC, bits, mask[4];
     std::size_t dataOffset;
+    std::uint32_t dxgi = 0;   // DX10 header's format, 0 if none
 };
 
 Header header(const std::uint8_t* d, std::size_t n) {
@@ -31,14 +34,43 @@ Header header(const std::uint8_t* d, std::size_t n) {
     h.bits = u32(d + 88);
     for (int k = 0; k < 4; ++k) h.mask[k] = u32(d + 92 + 4 * k);
     h.dataOffset = 128;
-    if ((h.pfFlags & kFourCC) && std::memcmp(d + 84, "DX10", 4) == 0) throw std::runtime_error("DX10 DDS pictures aren't supported yet");
+    if ((h.pfFlags & kFourCC) && std::memcmp(d + 84, "DX10", 4) == 0) {
+        if (n < 148) throw std::runtime_error("DDS picture is cut short");
+        h.dxgi = u32(d + 128);
+        h.dataOffset = 148;
+    }
     if (h.width == 0 || h.height == 0 || h.width > 16384 || h.height > 16384) throw std::runtime_error("bad DDS size");
     return h;
 }
 
-enum class Fmt { Dxt1, Dxt3, Dxt5, Raw };
+enum class Fmt { Dxt1, Dxt3, Dxt5, Bc7, Raw };
 
-Fmt format(const Header& h) {
+Fmt format(Header& h) {
+    if (h.dxgi) {
+        switch (h.dxgi) {
+            case 70: case 71: case 72: return Fmt::Dxt1;
+            case 73: case 74: case 75: return Fmt::Dxt3;
+            case 76: case 77: case 78: return Fmt::Dxt5;
+            case 97: case 98: case 99: return Fmt::Bc7;
+            case 27: case 28: case 29:   // R8G8B8A8
+                h.bits = 32;
+                h.pfFlags = kRgb | kAlphaPixels;
+                h.mask[0] = 0xFF; h.mask[1] = 0xFF00; h.mask[2] = 0xFF0000; h.mask[3] = 0xFF000000u;
+                return Fmt::Raw;
+            case 87: case 90: case 91:   // B8G8R8A8
+                h.bits = 32;
+                h.pfFlags = kRgb | kAlphaPixels;
+                h.mask[0] = 0xFF0000; h.mask[1] = 0xFF00; h.mask[2] = 0xFF; h.mask[3] = 0xFF000000u;
+                return Fmt::Raw;
+            case 88: case 92: case 93:   // B8G8R8X8
+                h.bits = 32;
+                h.pfFlags = kRgb;
+                h.mask[0] = 0xFF0000; h.mask[1] = 0xFF00; h.mask[2] = 0xFF; h.mask[3] = 0;
+                return Fmt::Raw;
+            default:
+                throw std::runtime_error("DDS format (DXGI " + std::to_string(h.dxgi) + ") isn't supported");
+        }
+    }
     if (h.pfFlags & kFourCC) {
         if (h.fourCC == 0x31545844) return Fmt::Dxt1;   // "DXT1"
         if (h.fourCC == 0x33545844) return Fmt::Dxt3;   // "DXT3"
@@ -56,7 +88,8 @@ std::size_t levelBytes(const Header& h, Fmt f, std::uint32_t w, std::uint32_t ht
     switch (f) {
         case Fmt::Dxt1: return bw * bh * 8;
         case Fmt::Dxt3:
-        case Fmt::Dxt5: return bw * bh * 16;
+        case Fmt::Dxt5:
+        case Fmt::Bc7: return bw * bh * 16;
         case Fmt::Raw: return std::size_t(w) * ht * (h.bits / 8);
     }
     return 0;
@@ -99,7 +132,9 @@ void decodeBlocks(const std::uint8_t* src, Fmt f, std::uint32_t w, std::uint32_t
         for (std::uint32_t bx = 0; bx < bw; ++bx) {
             const std::uint8_t* b = src + (std::size_t(by) * bw + bx) * step;
             std::uint8_t px[16][4];
-            if (f == Fmt::Dxt1) {
+            if (f == Fmt::Bc7) {
+                bc7::decodeBlock(b, px);
+            } else if (f == Fmt::Dxt1) {
                 colourBlock(b, false, px);
             } else {
                 colourBlock(b + 8, true, px);
@@ -185,6 +220,7 @@ void shrink(Image& im, std::uint32_t maxSide) {
 std::string formatName(const std::uint8_t* data, std::size_t size) {
     try {
         const Header h = header(data, size);
+        if (h.dxgi) return h.dxgi == 98 || h.dxgi == 99 ? "BC7" : "DXGI " + std::to_string(h.dxgi);
         if (h.pfFlags & kFourCC) {
             char c[5] = {};
             std::memcpy(c, &h.fourCC, 4);
@@ -197,7 +233,7 @@ std::string formatName(const std::uint8_t* data, std::size_t size) {
 }
 
 Image decode(const std::uint8_t* data, std::size_t size, std::uint32_t maxSide) {
-    const Header h = header(data, size);
+    Header h = header(data, size);
     const Fmt f = format(h);
     // Walk the mip chain to the first level that fits (or the last one stored).
     std::size_t off = h.dataOffset;

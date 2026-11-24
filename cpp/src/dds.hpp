@@ -1,5 +1,6 @@
 // DirectDraw Surface (.dds) pictures, as used by Assetto Corsa: decode to RGBA.
-// Supports DXT1, DXT3, DXT5 (BC1-3) and uncompressed RGB/RGBA/luminance/alpha formats,
+// Supports DXT1, DXT3, DXT5 (BC1-3), BC7 and uncompressed RGB/RGBA/luminance/alpha formats
+// (with the old header or the DX10 one),
 // which is everything the checked tracks use (Mugello: Kunos, Monaco 2020: a mod).
 #pragma once
 

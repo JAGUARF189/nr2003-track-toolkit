@@ -30,6 +30,7 @@ target_link_libraries(ptfjson PRIVATE ptf)
 add_library(ac STATIC
   src/kn5.cpp
   src/dds.cpp
+  src/bc7.cpp
   src/actrack.cpp
 )
 target_include_directories(ac PUBLIC src)
@@ -38,3 +39,8 @@ target_include_directories(ac PUBLIC src)
 add_executable(acdump tools/acdump.cpp)
 target_link_libraries(acdump PRIVATE ac)
 target_compile_definitions(acdump PRIVATE _CRT_SECURE_NO_WARNINGS)
+
+# Decode the textures of a .kn5 to raw RGBA files (for checking the DDS/BC7 decoders).
+add_executable(kn5tex tools/kn5tex.cpp)
+target_link_libraries(kn5tex PRIVATE ac)
+target_compile_definitions(kn5tex PRIVATE _CRT_SECURE_NO_WARNINGS)

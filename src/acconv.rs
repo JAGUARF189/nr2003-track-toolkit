@@ -562,10 +562,10 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
     }
     // a first fit of the heading within ~0.8°, then refine and split where it strays
     let mut knots = split_knots(&h, 0.8f64.to_radians());
-    for _ in 0..12 {
+    for _ in 0..40 {
         let (straight, turn) = classify(&h, &knots);
         let mut fit = Fit { knots: knots.clone(), straight, turn, h0: h[0], p0: cl.pos[0] };
-        refine(&mut fit, cl, total, 25);
+        refine(&mut fit, cl, total, 30);
         let (worst, _, mean) = fit.worst(cl);
         // split every piece whose own worst error is too big, at that worst sample
         let pieces = fit.pieces(cl.ds);
@@ -590,9 +590,7 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
             }
         }
         if worst <= tol_m || add.is_empty() {
-            let mut pieces = fit.pieces(cl.ds);
-            close_exactly(&mut pieces, cl.length());
-            return Ok((pieces, worst, mean));
+            return Ok((fit.pieces(cl.ds), worst, mean));
         }
         knots.extend(add);
         knots.sort_unstable();
@@ -602,20 +600,19 @@ pub fn fit_plan(cl: &Centerline, tol_m: f64) -> Result<(Vec<Piece>, f64, f64)> {
     let mut fit = Fit { knots, straight, turn, h0: h[0], p0: cl.pos[0] };
     refine(&mut fit, cl, total, 40);
     let (worst, _, mean) = fit.worst(cl);
-    let mut pieces = fit.pieces(cl.ds);
-    close_exactly(&mut pieces, cl.length());
-    Ok((pieces, worst, mean))
+    Ok((fit.pieces(cl.ds), worst, mean))
 }
 
-/// Take up the last few millimetres of closing gap by nudging every piece's start a little
-/// (spread along the lap), so the last piece ends exactly where the first starts.
-fn close_exactly(pieces: &mut [Piece], total: f64) {
-    let Some(last) = pieces.last() else { return };
-    let end = last.end();
-    let gap = [pieces[0].p0[0] - end[0], pieces[0].p0[1] - end[1]];
-    for p in pieces.iter_mut() {
-        let f = p.s0 / total;
-        p.p0 = [p.p0[0] + gap[0] * f, p.p0[1] + gap[1] * f];
+/// The gap left between the last piece's end and the first piece's start. When the pieces are
+/// written, every join point moves by the share of it at its distance round the lap, so the
+/// lap closes exactly and a piece's direction changes by only about gap / lap length.
+fn closing_gap(pieces: &[Piece]) -> [f64; 2] {
+    match (pieces.first(), pieces.last()) {
+        (Some(f), Some(l)) => {
+            let e = l.end();
+            [f.p0[0] - e[0], f.p0[1] - e[1]]
+        }
+        _ => [0.0, 0.0],
     }
 }
 
@@ -905,6 +902,8 @@ pub struct Report {
     pub crashes: Vec<String>,
     /// Subtracted from AC's x, y to centre the NR2003 track (add it back to compare).
     pub offset: [f64; 2],
+    /// Gap the fit left at the start/finish line, spread round the lap when writing (metres).
+    pub closing_gap_m: f64,
     /// Pieces whose ground and walls came from AC (the rest: plain asphalt and grass).
     pub ac_ground_pieces: usize,
     /// Walls placed where AC has walls, and safety walls at the edge of the ground.
@@ -1525,6 +1524,9 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     }
     let off = [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])];
     report.offset = off;
+    let gap = closing_gap(&pieces);
+    let lap: f64 = pieces.iter().map(|p| p.len).sum::<f64>().max(1.0);
+    report.closing_gap_m = gap[0].hypot(gap[1]);
     // Room beside the road per side at every join between pieces: the room left beside both
     // pieces that meet there (and short of a turn's centre). Within a piece it runs straight from
     // one join's value to the next, so it never goes past the room and walls don't step.
@@ -1817,10 +1819,16 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
         seg.id = next;
         next += 1;
         let end = pc.end();
-        let start = if pi == 0 { pc.p0 } else { pieces[pi - 1].end() };
-        let sx = start[0] - off[0];
-        let sy = start[1] - off[1];
-        let (ex, ey) = if pi + 1 == pieces.len() { (pieces[0].p0[0] - off[0], pieces[0].p0[1] - off[1]) } else { (end[0] - off[0], end[1] - off[1]) };
+        // join points moved by their share of the closing gap (see `closing_gap`)
+        let share = |s: f64| [gap[0] * s / lap, gap[1] * s / lap];
+        let (f0, f1) = (share(pc.s0), share(pc.s0 + pc.len));
+        let sx = pc.p0[0] + f0[0] - off[0];
+        let sy = pc.p0[1] + f0[1] - off[1];
+        let (ex, ey) = if pi + 1 == pieces.len() {
+            (pieces[0].p0[0] - off[0], pieces[0].p0[1] - off[1])
+        } else {
+            (end[0] + f1[0] - off[0], end[1] + f1[1] - off[1])
+        };
         seg.set("type", json!(if straight { 0 } else { 1 }))?;
         for (f, v) in [("sx", sx), ("sy", sy), ("sh", wrap_heading(pc.h0)), ("ex", ex), ("ey", ey), ("eh", wrap_heading(pc.h1))] {
             seg.set(f, json!(v))?;
