@@ -60,7 +60,8 @@ impl TexStore {
         Self { dir: track_dir.to_path_buf(), by_name, dats }
     }
 
-    fn bytes(&self, file: &str) -> Option<Vec<u8>> {
+    /// The file's bytes (from the folder, trackmat, a .dat or shared).
+    pub fn bytes(&self, file: &str) -> Option<Vec<u8>> {
         let direct = self.dir.join(file.replace('\\', "/"));
         if direct.is_file() {
             return std::fs::read(direct).ok();

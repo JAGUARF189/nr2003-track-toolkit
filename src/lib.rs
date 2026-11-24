@@ -9,6 +9,7 @@
 //! 6. Stalls    — `mkstalls` on an LP file, merged into track.ini
 
 pub mod ac;
+pub mod acconv;
 pub mod config;
 pub mod dat;
 pub mod inifile;
