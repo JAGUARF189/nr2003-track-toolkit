@@ -178,11 +178,15 @@ int surfaceOf(const std::string& meshName, const std::vector<Surface>& s) {
     std::size_t k = 0;
     while (k < meshName.size() && std::isdigit(static_cast<unsigned char>(meshName[k]))) ++k;
     if (k == 0) return -1;
-    const std::string rest = meshName.substr(k);
+    // AC ignores case and a separator after the digits: 1_tracka is TRACKA (00_ajaccio)
+    std::string rest = meshName.substr(k);
+    while (!rest.empty() && (rest[0] == '_' || rest[0] == ' ' || rest[0] == '-')) rest.erase(0, 1);
+    for (char& c : rest) c = char(std::toupper(static_cast<unsigned char>(c)));
     int best = -1;
     std::size_t bestLen = 0;
     for (std::size_t i = 0; i < s.size(); ++i) {
-        const std::string& key = s[i].key;
+        std::string key = s[i].key;
+        for (char& c : key) c = char(std::toupper(static_cast<unsigned char>(c)));
         if (key.size() > bestLen && rest.size() >= key.size() && rest.compare(0, key.size(), key) == 0) {
             best = int(i);
             bestLen = key.size();

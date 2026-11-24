@@ -97,29 +97,31 @@ pub fn centerline(ai: &[AcAiPoint], ds: f64) -> Result<Centerline> {
     if n < 20 {
         bail!("the AC track has no usable AI line (ai\\fast_lane.ai)");
     }
-    let mut cx = Vec::with_capacity(n);
-    let mut cy = Vec::with_capacity(n);
-    let mut cz = Vec::with_capacity(n);
-    let mut w = Vec::with_capacity(n);
     let have_edges = ai.iter().filter(|p| p.left + p.right > 1.0).count() > n / 2;
-    for k in 0..n {
-        let (a, b) = (ai[(k + n - 1) % n].pos, ai[(k + 1) % n].pos);
-        let (dx, dy) = ((b[0] - a[0]) as f64, (b[1] - a[1]) as f64);
-        let len = dx.hypot(dy).max(1e-9);
-        let (lx, ly) = (-dy / len, dx / len); // left of travel
-        let p = ai[k];
-        let (l, r) = if have_edges { (p.left as f64, p.right as f64) } else { (6.0, 6.0) };
-        let shift = 0.5 * (l - r);
-        cx.push(p.pos[0] as f64 + lx * shift);
-        cy.push(p.pos[1] as f64 + ly * shift);
-        cz.push(p.pos[2] as f64);
-        w.push((l + r).max(3.0));
-    }
-    // smooth over about 8 m (the AI points are 1-2 m apart) and the width over about 30 m
+    // The AI line (smoothed over ~8 m; points are 1-2 m apart), and how far the middle of the
+    // road is to its left (smoothed over ~20 m: AC's edge distances can jump, and a jump would
+    // put a kink in the centerline), and the width (~30 m).
     let spacing = ai.last().map_or(1.0, |p| p.distance as f64 / n as f64).max(0.3);
     let hp = ((4.0 / spacing).round() as usize).max(1);
+    let hs = ((10.0 / spacing).round() as usize).max(1);
     let hw = ((15.0 / spacing).round() as usize).max(1);
-    let (cx, cy, cz, w) = (smooth_closed(&cx, hp), smooth_closed(&cy, hp), smooth_closed(&cz, hp), smooth_closed(&w, hw));
+    let col = |f: &dyn Fn(&AcAiPoint) -> f64| -> Vec<f64> { ai.iter().map(f).collect() };
+    let px = smooth_closed(&col(&|p| p.pos[0] as f64), hp);
+    let py = smooth_closed(&col(&|p| p.pos[1] as f64), hp);
+    let cz = smooth_closed(&col(&|p| p.pos[2] as f64), hp);
+    let edge = |p: &AcAiPoint| if have_edges { (p.left as f64, p.right as f64) } else { (6.0, 6.0) };
+    let shift = smooth_closed(&col(&|p| 0.5 * (edge(p).0 - edge(p).1)), hs);
+    let w = smooth_closed(&col(&|p| (edge(p).0 + edge(p).1).max(3.0)), hw);
+    let mut cx = Vec::with_capacity(n);
+    let mut cy = Vec::with_capacity(n);
+    for k in 0..n {
+        let (a, b) = ((k + n - 1) % n, (k + 1) % n);
+        let (dx, dy) = (px[b] - px[a], py[b] - py[a]);
+        let len = dx.hypot(dy).max(1e-9);
+        let (lx, ly) = (-dy / len, dx / len); // left of travel
+        cx.push(px[k] + lx * shift[k]);
+        cy.push(py[k] + ly * shift[k]);
+    }
     // cumulative distance around the closed loop
     let mut s = vec![0.0; n + 1];
     for k in 0..n {
@@ -250,25 +252,6 @@ impl Fit {
         out
     }
 
-    /// Residuals: distance to the centerline at every `step`-th sample, then the closing gap
-    /// (weighted).
-    fn residuals(&self, cl: &Centerline, step: usize, out: &mut Vec<f64>) {
-        out.clear();
-        let pieces = self.pieces(cl.ds);
-        let mut k = 0;
-        for i in (0..cl.len()).step_by(step) {
-            while k + 1 < pieces.len() && self.knots[k + 1] <= i {
-                k += 1;
-            }
-            let p = pieces[k].at((i - self.knots[k]) as f64 * cl.ds);
-            out.push(p[0] - cl.pos[i][0]);
-            out.push(p[1] - cl.pos[i][1]);
-        }
-        let end = pieces.last().map_or(self.p0, |p| p.end());
-        out.push(50.0 * (end[0] - self.p0[0]));
-        out.push(50.0 * (end[1] - self.p0[1]));
-    }
-
     /// Worst distance from the centerline and the sample where it is.
     fn worst(&self, cl: &Centerline) -> (f64, usize, f64) {
         let pieces = self.pieces(cl.ds);
@@ -290,120 +273,252 @@ impl Fit {
     }
 }
 
-/// Solve the square system `a x = b` (Gaussian elimination with partial pivoting).
-fn solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
-    for c in 0..n {
-        let p = (c..n).max_by(|&i, &j| a[i * n + c].abs().total_cmp(&a[j * n + c].abs()))?;
-        if a[p * n + c].abs() < 1e-14 {
-            return None;
-        }
-        if p != c {
-            for k in 0..n {
-                a.swap(c * n + k, p * n + k);
-            }
-            b.swap(c, p);
-        }
-        for r in c + 1..n {
-            let f = a[r * n + c] / a[c * n + c];
-            if f != 0.0 {
-                for k in c..n {
-                    a[r * n + k] -= f * a[c * n + k];
-                }
-                b[r] -= f * b[c];
-            }
-        }
-    }
-    let mut x = vec![0.0; n];
-    for r in (0..n).rev() {
-        let mut s = b[r];
-        for k in r + 1..n {
-            s -= a[r * n + k] * x[k];
-        }
-        x[r] = s / a[r * n + r];
-    }
-    Some(x)
+fn rot90(v: [f64; 2]) -> [f64; 2] {
+    [-v[1], v[0]]
+}
+fn rotm90(v: [f64; 2]) -> [f64; 2] {
+    [v[1], -v[0]]
+}
+fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+fn sub2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+fn add2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+fn scale2(a: [f64; 2], k: f64) -> [f64; 2] {
+    [a[0] * k, a[1] * k]
 }
 
-/// Least-squares refinement of the arcs' turns and the start (Levenberg-Marquardt), keeping
-/// the lap's total turn exact by letting the biggest arc take up the difference.
+/// How the point `d` metres into an arc piece moves when its turn changes (per radian):
+/// the integral of (u/len) * left(heading(u)) du from 0 to d (Simpson's rule).
+fn turn_derivative(pc: &Piece, d: f64) -> [f64; 2] {
+    if d <= 0.0 {
+        return [0.0, 0.0];
+    }
+    let k = (pc.h1 - pc.h0) / pc.len;
+    let f = |u: f64| {
+        let h = pc.h0 + k * u;
+        scale2([-h.sin(), h.cos()], u / pc.len)
+    };
+    let n = 16;
+    let hstep = d / n as f64;
+    let mut acc = add2(f(0.0), f(d));
+    for q in 1..n {
+        acc = add2(acc, scale2(f(q as f64 * hstep), if q % 2 == 1 { 4.0 } else { 2.0 }));
+    }
+    scale2(acc, hstep / 3.0)
+}
+
+/// Solve the symmetric positive-definite system `a x = b` (Cholesky). None if it isn't.
+fn solve_spd(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
+    for c in 0..n {
+        let mut d = a[c * n + c];
+        for k in 0..c {
+            d -= a[c * n + k] * a[c * n + k];
+        }
+        if d <= 1e-14 {
+            return None;
+        }
+        let d = d.sqrt();
+        a[c * n + c] = d;
+        for r in c + 1..n {
+            let mut v = a[r * n + c];
+            for k in 0..c {
+                v -= a[r * n + k] * a[c * n + k];
+            }
+            a[r * n + c] = v / d;
+        }
+    }
+    for r in 0..n {
+        let mut v = b[r];
+        for k in 0..r {
+            v -= a[r * n + k] * b[k];
+        }
+        b[r] = v / a[r * n + r];
+    }
+    for r in (0..n).rev() {
+        let mut v = b[r];
+        for k in r + 1..n {
+            v -= a[k * n + r] * b[k];
+        }
+        b[r] = v / a[r * n + r];
+    }
+    Some(b)
+}
+
+/// Least-squares refinement of the arcs' turns, the start heading and the start position
+/// (Levenberg-Marquardt), with the lap's closing gap and total turn as heavily weighted extra
+/// conditions.
+///
+/// Speed: turning arc k swings everything after it about the point `a_k` (its end, shifted by
+/// how the end itself moves), so the Jacobian column for k at a sample P after it is
+/// rot90(P - a_k). Its dot products with other columns are then |P|² - P·(a_k + a_l) + a_k·a_l,
+/// whose sums over samples come from running totals: building the normal equations costs
+/// O(pieces²) rather than O(pieces² × samples).
 fn refine(fit: &mut Fit, cl: &Centerline, total: f64, iterations: usize) {
-    let curves: Vec<usize> = (0..fit.turn.len()).filter(|&k| !fit.straight[k]).collect();
+    let np = fit.turn.len();
+    let curves: Vec<usize> = (0..np).filter(|&k| !fit.straight[k]).collect();
     if curves.is_empty() {
         return;
     }
-    let dep = *curves.iter().max_by(|&&a, &&b| fit.turn[a].abs().total_cmp(&fit.turn[b].abs())).unwrap();
-    let free: Vec<usize> = curves.iter().copied().filter(|&k| k != dep).collect();
-    let np = free.len() + 3; // free turns, start heading, start x, start y
-    let step = if cl.len() > 4000 { 2 } else { 1 };
-    let set = |fit: &mut Fit, p: &[f64]| {
-        for (j, &k) in free.iter().enumerate() {
-            fit.turn[k] = p[j];
+    let nc = curves.len();
+    let (hc, xc, yc) = (nc, nc + 1, nc + 2); // columns: start heading, start x, start y
+    let nparam = nc + 3;
+    let (w_pos, w_head) = (50.0, 2000.0);
+    let step = if cl.len() > 6000 { 2 } else { 1 };
+    let samples: Vec<usize> = (0..cl.len()).step_by(step).collect();
+
+    // residual cost of the current fit
+    let cost_of = |fit: &Fit| -> f64 {
+        let pieces = fit.pieces(cl.ds);
+        let mut c = 0.0;
+        let mut k = 0;
+        for &i in &samples {
+            while k + 1 < pieces.len() && fit.knots[k + 1] <= i {
+                k += 1;
+            }
+            let p = pieces[k].at((i - fit.knots[k]) as f64 * cl.ds);
+            c += (p[0] - cl.pos[i][0]).powi(2) + (p[1] - cl.pos[i][1]).powi(2);
         }
-        fit.h0 = p[free.len()];
-        fit.p0 = [p[free.len() + 1], p[free.len() + 2]];
-        let others: f64 = (0..fit.turn.len()).filter(|&k| k != dep).map(|k| fit.turn[k]).sum();
-        fit.turn[dep] = total - others;
+        let end = pieces.last().map_or(fit.p0, |p| p.end());
+        c += w_pos * w_pos * ((end[0] - fit.p0[0]).powi(2) + (end[1] - fit.p0[1]).powi(2));
+        let turned: f64 = fit.turn.iter().sum();
+        c += (w_head * (turned - total)).powi(2);
+        c
     };
-    let mut p: Vec<f64> = free.iter().map(|&k| fit.turn[k]).collect();
-    p.extend([fit.h0, fit.p0[0], fit.p0[1]]);
-    set(fit, &p);
-    let mut r = Vec::new();
-    fit.residuals(cl, step, &mut r);
-    let mut cost: f64 = r.iter().map(|x| x * x).sum();
+
+    let mut cost = cost_of(fit);
     let mut lambda = 1e-3;
-    let mut rp = Vec::new();
     for _ in 0..iterations {
-        // Jacobian by finite differences (columns)
-        let m = r.len();
-        let mut jac = vec![0.0; m * np];
-        for c in 0..np {
-            let eps = if c == free.len() + 1 || c == free.len() + 2 { 1e-3 } else { 1e-6 };
-            let mut q = p.clone();
-            q[c] += eps;
-            set(fit, &q);
-            fit.residuals(cl, step, &mut rp);
-            for i in 0..m {
-                jac[i * np + c] = (rp[i] - r[i]) / eps;
+        let pieces = fit.pieces(cl.ds);
+        let p0 = fit.p0;
+        // per piece: end point and (for arcs) the swing point a_k
+        let mut a_pt = vec![[0.0; 2]; np];
+        let mut c_end = vec![[0.0; 2]; np];
+        for k in 0..np {
+            if !fit.straight[k] {
+                c_end[k] = turn_derivative(&pieces[k], pieces[k].len);
+                a_pt[k] = sub2(pieces[k].end(), rotm90(c_end[k]));
             }
         }
-        set(fit, &p);
-        let mut jtj = vec![0.0; np * np];
-        let mut jtr = vec![0.0; np];
-        for i in 0..m {
-            let row = &jac[i * np..(i + 1) * np];
-            for a in 0..np {
-                if row[a] == 0.0 {
-                    continue;
-                }
-                jtr[a] += row[a] * r[i];
-                for b in a..np {
-                    jtj[a * np + b] += row[a] * row[b];
-                }
+        // per piece totals over its samples
+        let mut cnt = vec![0.0; np + 1];
+        let mut s1 = vec![[0.0; 2]; np + 1];
+        let mut s2 = vec![0.0; np + 1];
+        let mut u1 = vec![[0.0; 2]; np + 1];
+        let mut u2 = vec![0.0; np + 1];
+        let mut sr = [0.0; 2];
+        // samples inside an arc: how they move with that arc's own turn
+        let mut t1 = vec![[0.0; 2]; np];
+        let mut t2 = vec![0.0; np];
+        let mut wsum = vec![[0.0; 2]; np];
+        let mut ww = vec![0.0; np];
+        let mut wr = vec![0.0; np];
+        let mut k = 0;
+        for &i in &samples {
+            while k + 1 < np && fit.knots[k + 1] <= i {
+                k += 1;
+            }
+            let d = (i - fit.knots[k]) as f64 * cl.ds;
+            let pt = pieces[k].at(d);
+            let r = sub2(pt, cl.pos[i]);
+            cnt[k] += 1.0;
+            s1[k] = add2(s1[k], pt);
+            s2[k] += dot(pt, pt);
+            let rr = rotm90(r);
+            u1[k] = add2(u1[k], rr);
+            u2[k] += dot(pt, rr);
+            sr = add2(sr, r);
+            if !fit.straight[k] {
+                let w = turn_derivative(&pieces[k], d);
+                let rw = rotm90(w);
+                t1[k] = add2(t1[k], rw);
+                t2[k] += dot(rw, pt);
+                wsum[k] = add2(wsum[k], w);
+                ww[k] += dot(w, w);
+                wr[k] += dot(w, r);
             }
         }
-        for a in 0..np {
-            for b in 0..a {
-                jtj[a * np + b] = jtj[b * np + a];
-            }
+        // suffix totals: everything from piece q on
+        for q in (0..np).rev() {
+            cnt[q] += cnt[q + 1];
+            s1[q] = add2(s1[q], s1[q + 1]);
+            s2[q] += s2[q + 1];
+            u1[q] = add2(u1[q], u1[q + 1]);
+            u2[q] += u2[q + 1];
         }
+        let pend = pieces.last().map_or(p0, |p| p.end());
+        let rc = scale2(sub2(pend, p0), w_pos);
+        let turned: f64 = fit.turn.iter().sum();
+        let rh = w_head * (turned - total);
+
+        // normal equations
+        let mut am = vec![0.0; nparam * nparam];
+        let mut g = vec![0.0; nparam];
+        let sum_pp = |m: usize, x: [f64; 2], y: [f64; 2]| s2[m] - dot(s1[m], add2(x, y)) + cnt[m] * dot(x, y);
+        for (ja, &ka) in curves.iter().enumerate() {
+            let aa = a_pt[ka];
+            for (jb, &kb) in curves.iter().enumerate().skip(ja) {
+                let ab = a_pt[kb];
+                let mut v = if ka == kb {
+                    sum_pp(ka + 1, aa, aa) + ww[ka]
+                } else {
+                    // ka < kb: samples after kb see both swings; samples inside kb see ka's swing
+                    // and kb's own turn
+                    sum_pp(kb + 1, aa, ab) + t2[kb] - dot(t1[kb], aa)
+                };
+                v += w_pos * w_pos * dot(sub2(pend, aa), sub2(pend, ab)) + w_head * w_head;
+                am[ja * nparam + jb] = v;
+                am[jb * nparam + ja] = v;
+            }
+            // with the start heading (swing about the start point)
+            let v = sum_pp(ka + 1, p0, aa) + t2[ka] - dot(t1[ka], p0) + w_pos * w_pos * dot(sub2(pend, aa), sub2(pend, p0));
+            am[ja * nparam + hc] = v;
+            am[hc * nparam + ja] = v;
+            // with the start position
+            let pv = add2(rot90(sub2(s1[ka + 1], scale2(aa, cnt[ka + 1]))), wsum[ka]);
+            am[ja * nparam + xc] = pv[0];
+            am[xc * nparam + ja] = pv[0];
+            am[ja * nparam + yc] = pv[1];
+            am[yc * nparam + ja] = pv[1];
+            g[ja] = u2[ka + 1] - dot(aa, u1[ka + 1]) + wr[ka] + w_pos * dot(sub2(pend, aa), rotm90(rc)) + w_head * rh;
+        }
+        am[hc * nparam + hc] = sum_pp(0, p0, p0) + w_pos * w_pos * dot(sub2(pend, p0), sub2(pend, p0));
+        let pv = rot90(sub2(s1[0], scale2(p0, cnt[0])));
+        am[hc * nparam + xc] = pv[0];
+        am[xc * nparam + hc] = pv[0];
+        am[hc * nparam + yc] = pv[1];
+        am[yc * nparam + hc] = pv[1];
+        am[xc * nparam + xc] = cnt[0];
+        am[yc * nparam + yc] = cnt[0];
+        g[hc] = u2[0] - dot(p0, u1[0]) + w_pos * dot(sub2(pend, p0), rotm90(rc));
+        g[xc] = sr[0];
+        g[yc] = sr[1];
+
+        // damped step, retried with more damping until the cost drops
         let mut improved = false;
         for _ in 0..8 {
-            let mut aug = jtj.clone();
-            for a in 0..np {
-                aug[a * np + a] += lambda * (1.0 + jtj[a * np + a]);
+            let mut aug = am.clone();
+            for q in 0..nparam {
+                aug[q * nparam + q] += lambda * (1.0 + am[q * nparam + q]);
             }
-            let Some(delta) = solve(aug, jtr.iter().map(|x| -x).collect(), np) else {
+            let Some(delta) = solve_spd(aug, g.iter().map(|x| -x).collect(), nparam) else {
                 lambda *= 10.0;
                 continue;
             };
-            let q: Vec<f64> = p.iter().zip(&delta).map(|(a, d)| a + d).collect();
-            set(fit, &q);
-            fit.residuals(cl, step, &mut rp);
-            let c2: f64 = rp.iter().map(|x| x * x).sum();
+            let mut trial = Fit { knots: fit.knots.clone(), straight: fit.straight.clone(), turn: fit.turn.clone(), h0: fit.h0, p0: fit.p0 };
+            for (j, &k) in curves.iter().enumerate() {
+                trial.turn[k] += delta[j];
+            }
+            trial.h0 += delta[hc];
+            trial.p0 = [trial.p0[0] + delta[xc], trial.p0[1] + delta[yc]];
+            let c2 = cost_of(&trial);
             if c2 < cost {
-                p = q;
-                std::mem::swap(&mut r, &mut rp);
                 let gain = (cost - c2) / cost.max(1e-12);
+                *fit = trial;
                 cost = c2;
                 lambda = (lambda * 0.3).max(1e-9);
                 improved = gain > 1e-7;
@@ -411,10 +526,14 @@ fn refine(fit: &mut Fit, cl: &Centerline, total: f64, iterations: usize) {
             }
             lambda *= 10.0;
         }
-        set(fit, &p);
         if !improved {
             break;
         }
+    }
+    // the total turn exactly (the weighted condition leaves micro-radians): the biggest arc
+    let turned: f64 = fit.turn.iter().sum();
+    if let Some(&k) = curves.iter().max_by(|&&a, &&b| fit.turn[a].abs().total_cmp(&fit.turn[b].abs())) {
+        fit.turn[k] += total - turned;
     }
 }
 
@@ -753,7 +872,7 @@ pub fn nr_surface(key: &str, valid: bool) -> i64 {
         7
     } else if has(&["DIRT", "MUD"]) {
         5
-    } else if has(&["GRASS", "GRS", "GREEN"]) {
+    } else if has(&["GRAS", "GRS", "GREEN"]) {
         4
     } else if has(&["CONCRETE", "PIT", "SIDEWALK", "CEMENT"]) {
         2
@@ -1159,6 +1278,78 @@ fn surfaces_of(r: &Option<Vec<(i64, f64, f64)>>) -> Option<Vec<i64>> {
     r.as_ref().map(|v| v.iter().map(|x| x.0).collect())
 }
 
+/// Keep everything on the inside of a turn (`inside` = +1 left, -1 right) within `limit` of the
+/// centerline: cross-section points and strip edges past it are pulled back to it, strips left
+/// with no width are dropped, and walls are moved in.
+fn clip_inside(l: &mut Layout, inside: f64, limit: f64, wall_half: f64) {
+    let limit = limit.max(0.1);
+    let clip = |d: f64| if inside > 0.0 { d.min(limit) } else { d.max(-limit) };
+    let beyond = |d: f64| if inside > 0.0 { d >= limit - 1e-9 } else { d <= -limit + 1e-9 };
+    if !l.xs.iter().any(|x| beyond(x.0[0]) || beyond(x.0[1])) && !l.strips.iter().any(|st| beyond(st.1[0]) || beyond(st.1[1])) {
+        return;
+    }
+    for x in &mut l.xs {
+        x.0 = [clip(x.0[0]), clip(x.0[1])];
+    }
+    // cross-section points pulled onto the limit at both ends: keep only the innermost of them
+    let mut seen_edge = false;
+    if inside > 0.0 {
+        l.xs.retain(|x| {
+            let at = beyond(x.0[0]) && beyond(x.0[1]);
+            let keep = !at || !seen_edge;
+            seen_edge |= at;
+            keep
+        });
+    } else {
+        l.xs.reverse();
+        l.xs.retain(|x| {
+            let at = beyond(x.0[0]) && beyond(x.0[1]);
+            let keep = !at || !seen_edge;
+            seen_edge |= at;
+            keep
+        });
+        l.xs.reverse();
+    }
+    // keep the points in order with a little room between them
+    for k in 1..l.xs.len() {
+        for e in 0..2 {
+            if l.xs[k].0[e] < l.xs[k - 1].0[e] + 0.05 {
+                l.xs[k].0[e] = l.xs[k - 1].0[e] + 0.05;
+            }
+        }
+    }
+    let first = l.xs.first().map_or([0.0; 2], |x| x.0);
+    let last = l.xs.last().map_or([0.0; 2], |x| x.0);
+    for st in &mut l.strips {
+        st.1 = [clip(st.1[0]).max(first[0]).min(last[0]), clip(st.1[1]).max(first[1]).min(last[1])];
+    }
+    // strips with no width left (the next one starts where they do, at both ends)
+    let mut k = 0;
+    while k < l.strips.len() {
+        let next = l.strips.get(k + 1).map_or(last, |s| s.1);
+        let empty = next[0] - l.strips[k].1[0] < 0.02 && next[1] - l.strips[k].1[1] < 0.02;
+        if empty && l.strips.len() > 1 {
+            if k == 0 {
+                // the first strip starts at the right edge; the next one takes over from there
+                let start = l.strips[0].1;
+                l.strips.remove(0);
+                l.strips[0].1 = start;
+            } else {
+                l.strips.remove(k);
+            }
+        } else {
+            k += 1;
+        }
+    }
+    if let Some(f) = l.strips.first_mut() {
+        f.1 = first;
+    }
+    for w in &mut l.walls {
+        let pull = |d: f64| if inside > 0.0 { d.min(limit - wall_half) } else { d.max(-limit + wall_half) };
+        w.0 = [pull(w.0[0]), pull(w.0[1])];
+    }
+}
+
 /// Convert an AC scene into an NR2003 track graph, using `template` (a stock .ptf graph) for
 /// the pieces' strips, walls and track settings.
 pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Converted> {
@@ -1283,7 +1474,7 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     let has_grass = scene.meshes.iter().any(|m| {
         m.surface.and_then(|k| scene.surfaces.get(k)).is_some_and(|sf| {
             let k = sf.key.to_ascii_uppercase();
-            ["GRASS", "GRS", "GREEN"].iter().any(|w| k.contains(w))
+            ["GRAS", "GRS", "GREEN"].iter().any(|w| k.contains(w))
         })
     });
     let filler: i64 = if has_grass { 4 } else { 2 };
@@ -1564,6 +1755,12 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
                 Layout { xs, strips, walls, from_ac: false }
             }
         };
+        // Nothing may reach past a turn's centre (Sandbox won't load it): on tight turns,
+        // clip the inside short of the centre
+        let mut layout = layout;
+        if !straight {
+            clip_inside(&mut layout, inside, radius - 0.5, wh);
+        }
         if layout.from_ac {
             report.ac_ground_pieces += 1;
         }
