@@ -24,7 +24,7 @@ The **Look at a track** tab opens any installed track, or a `.ptf` / `.dat` file
 - **3D:** drag to turn, right-drag to move, scroll to zoom.
 - **Pieces list:** every straight and curve, with length, turn angle, radius and banking. The selected piece also shows its height, the ground across it (right to left) and its walls in plain words.
 
-`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N] [--wall N | --strip N] [--objects]` opens straight into this tab. `--wall`/`--strip` pick the Nth wall or ground strip, counting right to left, of that piece.
+`track-toolkit.exe <file.ptf|.dat> [--3d] [--piece N] [--wall N | --strip N] [--objects]` opens straight into this tab. `--wall`/`--strip` pick the Nth wall or ground strip, counting right to left, of that piece. `--dist M --yaw D --pitch D` set the 3D camera (for screenshots).
 
 ### Editing the shape (phase 3)
 
@@ -48,6 +48,13 @@ Select a piece (in the list or on the map) to edit it:
   - Steep road (over 10% grade), and ground strips or walls off the edge of the ground.
   - Texture/object files that can't be found.
 - **Calibration:** all 47 installed game tracks give no "won't load" findings.
+
+### Real textures
+
+The map and 3D view draw the track's own textures. Untick **Textures** for plain colours by surface and wall type.
+- **Exact placement:** each strip and wall face uses the texture coordinates stored in the track file, so pictures sit exactly where the game puts them. Signs read the right way round, and fences are see-through between the posts.
+- **Where textures are found:** the track folder and its `trackmat` folder, the track's `.dat` files, then `tracks\shared`. A texture that can't be found is drawn in its plain colour.
+- **Speed:** textures load at about 256 pixels in the background with the track. Watkins Glen's 75 textures take 0.05 s and about 6 MB.
 
 ### Walls, ground and textures (phase 5)
 

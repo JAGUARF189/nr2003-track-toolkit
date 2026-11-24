@@ -16,7 +16,11 @@ mod parts;
 mod saving;
 
 use ttk::track::check::Problem;
-use ttk::track::mesh::{self, TrackMesh, VERTEX_FLOATS};
+use ttk::track::mesh::{self, Batch, TrackMesh, VERTEX_FLOATS};
+use ttk::track::textures::TexStore;
+
+/// Textures are loaded at about this many pixels on their longer side.
+const TEX_SIDE: u32 = 256;
 use ttk::track::model::{self, surface_name, wall_name, Track, FEET_PER_METRE, METRES_PER_MILE};
 use ttk::track::graph;
 
@@ -54,6 +58,11 @@ struct Loaded {
     file_problems: Vec<Problem>,
     /// The track's folder (where its textures and objects are): where added objects are copied.
     folder: Option<PathBuf>,
+    /// Finds the track's .mip textures.
+    tex_store: Option<Arc<TexStore>>,
+    /// Textures decoded while loading: (lower-case file, picture), and every file tried.
+    tex_images: Vec<(String, image::RgbaImage)>,
+    tex_tried: Vec<String>,
 }
 
 struct Camera {
@@ -84,6 +93,10 @@ pub struct TrackView {
     selected: Option<usize>,
     show_walls: bool,
     show_objects: bool,
+    /// Draw the track's real textures (else plain colours by surface and wall type).
+    show_textures: bool,
+    /// Textures already sent to the 3D view (or tried and not found), lower-case.
+    tex_loaded: HashSet<String>,
     /// Scroll the piece list to the selection on the next frame (after a map click).
     scroll_list: bool,
     /// Viewport width / height, from the last frame.
@@ -112,6 +125,7 @@ pub struct TrackView {
     scroll_part: bool,
     /// Wall (true) or strip number to pick once loaded (command line).
     part_on_load: Option<(bool, usize)>,
+    cam_on_load: (Option<f64>, Option<f64>, Option<f64>),
     /// Selected placed objects (graph ids), in the order picked.
     obj_sel: Vec<i32>,
     /// Locked objects can't be picked on the map.
@@ -142,6 +156,8 @@ impl Default for TrackView {
             selected: None,
             show_walls: true,
             show_objects: true,
+            show_textures: true,
+            tex_loaded: HashSet::new(),
             scroll_list: false,
             aspect: 1.4,
             select_on_load: None,
@@ -159,6 +175,7 @@ impl Default for TrackView {
             part_note: None,
             scroll_part: false,
             part_on_load: None,
+            cam_on_load: (None, None, None),
             obj_sel: Vec::new(),
             locked: HashSet::new(),
             obj_drag: None,
@@ -203,7 +220,27 @@ impl TrackView {
                     .as_deref()
                     .map(|dir| ttk::track::check::missing_files(&g, dir, shared_folder(dir).as_deref()))
                     .unwrap_or_default();
-                Ok(Loaded { name, source, graph: g, track, mesh, save_path, restored, file_problems, folder })
+                // Decode the textures here, off the screen thread.
+                let tex_store = folder.as_deref().map(|d| Arc::new(TexStore::new(d)));
+                let tex_tried: Vec<String> = mesh.textures();
+                let tex_images = match &tex_store {
+                    Some(st) => tex_tried.iter().filter_map(|f| st.load(f, TEX_SIDE).map(|i| (f.to_ascii_lowercase(), i))).collect(),
+                    None => Vec::new(),
+                };
+                Ok(Loaded {
+                    name,
+                    source,
+                    graph: g,
+                    track,
+                    mesh,
+                    save_path,
+                    restored,
+                    file_problems,
+                    folder,
+                    tex_store,
+                    tex_images,
+                    tex_tried,
+                })
             })();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
@@ -228,6 +265,11 @@ impl TrackView {
         self.part_on_load = Some((wall, n));
     }
 
+    /// 3D camera distance (metres) and angles (degrees) once loaded (command line).
+    pub fn camera_on_load(&mut self, dist: Option<f64>, yaw: Option<f64>, pitch: Option<f64>) {
+        self.cam_on_load = (dist, yaw, pitch);
+    }
+
     /// Start in Objects mode (command line `--objects`).
     pub fn objects_mode(&mut self) {
         self.mode = Mode::Objects;
@@ -237,7 +279,12 @@ impl TrackView {
         let Some(rx) = &self.loading else { return };
         match rx.try_recv() {
             Ok(Ok(mut l)) => {
-                self.scene.lock().unwrap().pending = Some(std::mem::take(&mut l.mesh.verts));
+                {
+                    let mut scene = self.scene.lock().unwrap();
+                    scene.clear_textures = true;
+                    scene.pending_tex = std::mem::take(&mut l.tex_images);
+                }
+                self.tex_loaded = l.tex_tried.iter().map(|f| f.to_ascii_lowercase()).collect();
                 self.selected = None;
                 let restored = l.restored;
                 self.locked = l.save_path.as_deref().map(|p| ttk::track::objects::load_locks(p, &l.track)).unwrap_or_default();
@@ -249,6 +296,7 @@ impl TrackView {
                 self.obj_note = None;
                 self.objects_dirty = true;
                 self.loaded = Some(l);
+                self.upload_mesh();
                 self.reset_edits(restored);
                 self.layout_changed = false;
                 self.edit_error = None;
@@ -270,11 +318,28 @@ impl TrackView {
 
     fn rebuild_mesh(&mut self) {
         if let Some(l) = &mut self.loaded {
-            let mut m = mesh::build(&l.track, self.show_walls);
-            self.scene.lock().unwrap().pending = Some(std::mem::take(&mut m.verts));
-            l.mesh = m;
+            l.mesh = mesh::build(&l.track, self.show_walls);
         }
+        self.upload_mesh();
         self.objects_dirty = true;
+    }
+
+    /// Send the track mesh to the 3D view, loading any textures it needs that aren't there yet
+    /// (a texture picked in the wall/strip editor, say).
+    pub(super) fn upload_mesh(&mut self) {
+        let Some(l) = &mut self.loaded else { return };
+        let mut scene = self.scene.lock().unwrap();
+        scene.pending = Some((std::mem::take(&mut l.mesh.verts), l.mesh.batches.clone()));
+        if let Some(store) = &l.tex_store {
+            for f in l.mesh.textures() {
+                let key = f.to_ascii_lowercase();
+                if self.tex_loaded.insert(key.clone()) {
+                    if let Some(img) = store.load(&f, TEX_SIDE) {
+                        scene.pending_tex.push((key, img));
+                    }
+                }
+            }
+        }
     }
 
     fn fit(&mut self) {
@@ -412,6 +477,8 @@ impl TrackView {
         ui.horizontal(|ui| {
             changed |= ui.checkbox(&mut self.show_walls, "Show walls").changed();
             changed |= ui.checkbox(&mut self.show_objects, "Show objects").changed();
+            ui.checkbox(&mut self.show_textures, "Textures")
+                .on_hover_text("Show the track's own pictures (.mip). Off: plain colours by surface and wall type.");
         });
         if changed {
             self.rebuild_mesh();
@@ -492,6 +559,16 @@ impl TrackView {
         if self.fit_pending && self.loaded.is_some() {
             self.fit_pending = false;
             self.fit();
+            let (d, y, p) = std::mem::take(&mut self.cam_on_load);
+            if let Some(d) = d {
+                self.cam.dist = d.max(5.0);
+            }
+            if let Some(y) = y {
+                self.cam.yaw = y.to_radians();
+            }
+            if let Some(p) = p {
+                self.cam.pitch = p.to_radians().clamp(0.05, 1.55);
+            }
             let n = self.loaded.as_ref().map_or(0, |l| l.track.segments.len());
             if let Some(k) = self.select_on_load.take().filter(|&k| k < n) {
                 self.selected = Some(k);
@@ -600,8 +677,9 @@ impl TrackView {
         };
         let sel = self.selected.map(|k| k as f32).unwrap_or(-10.0);
         let scene = self.scene.clone();
+        let textured = self.show_textures;
         let cb = egui_glow::CallbackFn::new(move |_info, p| {
-            scene.lock().unwrap().paint(p.gl(), &mvp, sel);
+            scene.lock().unwrap().paint(p.gl(), &mvp, sel, textured);
         });
         painter.add(egui::PaintCallback { rect, callback: Arc::new(cb) });
 
@@ -789,16 +867,23 @@ fn norm(a: [f64; 3]) -> [f64; 3] {
 struct Scene {
     gl: Option<GlObjects>,
     failed: bool,
-    pending: Option<Vec<f32>>,
+    pending: Option<(Vec<f32>, Vec<Batch>)>,
     pending_objects: Option<Vec<f32>>,
-    count: i32,
+    /// Textures to upload: (lower-case file, picture).
+    pending_tex: Vec<(String, image::RgbaImage)>,
+    /// Delete the uploaded textures first (another track was opened).
+    clear_textures: bool,
+    batches: Vec<Batch>,
     count_objects: i32,
+    textures: std::collections::HashMap<String, glow::Texture>,
 }
 
 struct GlObjects {
     program: glow::Program,
     /// (vertex array, buffer) for the track, then the objects
     layers: [(glow::VertexArray, glow::Buffer); 2],
+    /// 1x1 white picture for untextured batches.
+    white: glow::Texture,
 }
 
 const VS: &str = r#"
@@ -806,23 +891,37 @@ IN vec3 a_pos;
 IN vec3 a_col;
 IN vec3 a_nrm;
 IN float a_seg;
+IN vec2 a_uv;
 uniform mat4 u_mvp;
 uniform float u_sel;
 OUT vec3 v_col;
+OUT vec2 v_uv;
+OUT float v_lit;
+OUT float v_sel;
 void main() {
     vec3 light = normalize(vec3(0.35, 0.25, 0.9));
-    float lit = 0.55 + 0.45 * abs(dot(normalize(a_nrm), light));
-    vec3 c = a_col;
-    if (abs(a_seg - u_sel) < 0.5) c = mix(c, vec3(1.0, 0.6, 0.15), 0.55);
-    v_col = c * lit;
+    v_lit = 0.55 + 0.45 * abs(dot(normalize(a_nrm), light));
+    v_col = a_col;
+    v_uv = a_uv;
+    v_sel = abs(a_seg - u_sel) < 0.5 ? 1.0 : 0.0;
     gl_Position = u_mvp * vec4(a_pos, 1.0);
 }
 "#;
 
 const FS: &str = r#"
 IN vec3 v_col;
+IN vec2 v_uv;
+IN float v_lit;
+IN float v_sel;
+uniform sampler2D u_tex;
+uniform float u_textured;
+uniform float u_alpha;
 void main() {
-    FRAG = vec4(v_col, 1.0);
+    vec4 t = TEX(u_tex, v_uv);
+    if (u_alpha > 0.5 && t.a < 0.5) discard;
+    vec3 c = mix(v_col, t.rgb, u_textured);
+    c = mix(c, vec3(1.0, 0.6, 0.15), (0.55 - 0.2 * u_textured) * v_sel);
+    FRAG = vec4(c * v_lit, 1.0);
 }
 "#;
 
@@ -840,7 +939,11 @@ impl Scene {
         );
         let fs = format!(
             "{head}{}\n{FS}",
-            if new { "#define IN in\nout vec4 o_color;\n#define FRAG o_color" } else { "#define IN varying\n#define FRAG gl_FragColor" }
+            if new {
+                "#define IN in\nout vec4 o_color;\n#define FRAG o_color\n#define TEX texture"
+            } else {
+                "#define IN varying\n#define FRAG gl_FragColor\n#define TEX texture2D"
+            }
         );
         unsafe {
             let program = gl.create_program()?;
@@ -869,7 +972,7 @@ impl Scene {
                 gl.bind_vertex_array(Some(vao));
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
                 let stride = (VERTEX_FLOATS * 4) as i32;
-                for (name, size, offset) in [("a_pos", 3, 0), ("a_col", 3, 3), ("a_nrm", 3, 6), ("a_seg", 1, 9)] {
+                for (name, size, offset) in [("a_pos", 3, 0), ("a_col", 3, 3), ("a_nrm", 3, 6), ("a_seg", 1, 9), ("a_uv", 2, 10)] {
                     if let Some(loc) = gl.get_attrib_location(program, name) {
                         gl.enable_vertex_attrib_array(loc);
                         gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, offset * 4);
@@ -880,11 +983,37 @@ impl Scene {
                 Ok((vao, vbo))
             };
             let layers = [layer()?, layer()?];
-            Ok(GlObjects { program, layers })
+            let white = Self::upload_texture(gl, 1, 1, &[255, 255, 255, 255])?;
+            Ok(GlObjects { program, layers, white })
         }
     }
 
-    fn paint(&mut self, gl: &glow::Context, mvp: &Mat, sel: f32) {
+    /// Upload an RGBA picture as a repeating, mipmapped texture.
+    unsafe fn upload_texture(gl: &glow::Context, w: u32, h: u32, rgba: &[u8]) -> Result<glow::Texture, String> {
+        let t = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(t));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            w as i32,
+            h as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(rgba)),
+        );
+        gl.generate_mipmap(glow::TEXTURE_2D);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        Ok(t)
+    }
+
+    fn paint(&mut self, gl: &glow::Context, mvp: &Mat, sel: f32, textured: bool) {
         if self.failed {
             return;
         }
@@ -900,26 +1029,46 @@ impl Scene {
         }
         let o = self.gl.as_ref().unwrap();
         unsafe {
-            for (k, pending) in [self.pending.take(), self.pending_objects.take()].into_iter().enumerate() {
+            if std::mem::take(&mut self.clear_textures) {
+                for (_, t) in self.textures.drain() {
+                    gl.delete_texture(t);
+                }
+            }
+            for (name, img) in std::mem::take(&mut self.pending_tex) {
+                match Self::upload_texture(gl, img.width(), img.height(), img.as_raw()) {
+                    Ok(t) => {
+                        if let Some(old) = self.textures.insert(name, t) {
+                            gl.delete_texture(old);
+                        }
+                    }
+                    Err(e) => eprintln!("texture {name}: {e}"),
+                }
+            }
+            let track = self.pending.take().map(|(v, b)| {
+                self.batches = b;
+                v
+            });
+            for (k, pending) in [track, self.pending_objects.take()].into_iter().enumerate() {
                 if let Some(v) = pending {
                     let bytes = std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4);
                     gl.bind_buffer(glow::ARRAY_BUFFER, Some(o.layers[k].1));
                     gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
                     gl.bind_buffer(glow::ARRAY_BUFFER, None);
-                    let n = (v.len() / VERTEX_FLOATS) as i32;
-                    if k == 0 {
-                        self.count = n;
-                    } else {
-                        self.count_objects = n;
+                    if k == 1 {
+                        self.count_objects = (v.len() / VERTEX_FLOATS) as i32;
                     }
                 }
             }
-            if self.count == 0 && self.count_objects == 0 {
+            if self.batches.is_empty() && self.count_objects == 0 {
                 return;
             }
             gl.use_program(Some(o.program));
             gl.uniform_matrix_4_f32_slice(gl.get_uniform_location(o.program, "u_mvp").as_ref(), false, mvp);
             gl.uniform_1_f32(gl.get_uniform_location(o.program, "u_sel").as_ref(), sel);
+            gl.uniform_1_i32(gl.get_uniform_location(o.program, "u_tex").as_ref(), 0);
+            let u_textured = gl.get_uniform_location(o.program, "u_textured");
+            let u_alpha = gl.get_uniform_location(o.program, "u_alpha");
+            gl.active_texture(glow::TEXTURE0);
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LEQUAL);
             gl.depth_mask(true);
@@ -927,12 +1076,24 @@ impl Scene {
             gl.clear(glow::DEPTH_BUFFER_BIT);
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
-            for (k, n) in [self.count, self.count_objects].into_iter().enumerate() {
-                if n > 0 {
-                    gl.bind_vertex_array(Some(o.layers[k].0));
-                    gl.draw_arrays(glow::TRIANGLES, 0, n);
-                }
+            // The track, one batch per texture (colour only when textures are off or missing).
+            gl.bind_vertex_array(Some(o.layers[0].0));
+            for b in &self.batches {
+                let tex = if textured { b.texture.as_ref().and_then(|f| self.textures.get(&f.to_ascii_lowercase())) } else { None };
+                gl.bind_texture(glow::TEXTURE_2D, Some(*tex.unwrap_or(&o.white)));
+                gl.uniform_1_f32(u_textured.as_ref(), if tex.is_some() { 1.0 } else { 0.0 });
+                gl.uniform_1_f32(u_alpha.as_ref(), if tex.is_some() && b.alpha_test { 1.0 } else { 0.0 });
+                gl.draw_arrays(glow::TRIANGLES, b.first, b.count);
             }
+            // The object markers: plain colours.
+            if self.count_objects > 0 {
+                gl.bind_vertex_array(Some(o.layers[1].0));
+                gl.bind_texture(glow::TEXTURE_2D, Some(o.white));
+                gl.uniform_1_f32(u_textured.as_ref(), 0.0);
+                gl.uniform_1_f32(u_alpha.as_ref(), 0.0);
+                gl.draw_arrays(glow::TRIANGLES, 0, self.count_objects);
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.disable(glow::DEPTH_TEST);
             gl.enable(glow::BLEND);
             gl.bind_vertex_array(None);

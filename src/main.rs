@@ -56,6 +56,11 @@ fn main() -> eframe::Result<()> {
                 let num = |flag: &str| {
                     args.iter().position(|a| a == flag).and_then(|k| args.get(k + 1)).and_then(|n| n.parse::<usize>().ok())
                 };
+                // --dist M / --yaw D / --pitch D: 3D camera, for screenshots
+                let real = |flag: &str| {
+                    args.iter().position(|a| a == flag).and_then(|k| args.get(k + 1)).and_then(|n| n.parse::<f64>().ok())
+                };
+                app.track_view.camera_on_load(real("--dist"), real("--yaw"), real("--pitch"));
                 if let Some(n) = num("--wall") {
                     app.track_view.pick_on_load(true, n);
                 } else if let Some(n) = num("--strip") {

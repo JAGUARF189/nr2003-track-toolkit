@@ -24,11 +24,44 @@ pub struct XSec {
     pub slope: [f64; 2],
 }
 
+/// A face's texture: the .mip file and the texture coordinates of the face's four corners,
+/// as stored in the file (TextureCoords `a[0]` = u, `a[1]` = v).
+///
+/// Corner order, checked against the layer fields (u = (dlat + d0) / (texel0 * size) and so on):
+/// - ground strip and wall top: start-right, end-right, end-left, start-left
+/// - wall right side: start-bottom, end-bottom, end-top, start-top
+/// - wall left side: start-top, end-top, end-bottom, start-bottom
+///
+/// That is, anticlockwise seen from outside, with v = 0 at the top of the picture.
+#[derive(Clone, Debug)]
+pub struct TexRef {
+    pub file: String,
+    pub uv: [[f64; 2]; 4],
+}
+
+impl TexRef {
+    /// Texture coordinates at (a, b): `a` runs from corner 0 to corner 1, `b` from there to corner 2.
+    pub fn at(&self, a: f64, b: f64) -> [f64; 2] {
+        let l = |p: [f64; 2], q: [f64; 2], t: f64| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+        l(l(self.uv[0], self.uv[1], a), l(self.uv[3], self.uv[2], a), b)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FSec {
     pub id: i32,
     pub dlat: [f64; 2],
     pub surface: i64,
+    pub tex: Option<TexRef>,
+}
+
+/// One part of a wall along its length (most walls have one), from `from` to `to` (0..1 along
+/// the piece), with the textures of its faces: right side, top, left side, near end, far end.
+#[derive(Clone, Debug)]
+pub struct WallPart {
+    pub from: f64,
+    pub to: f64,
+    pub faces: [Option<TexRef>; 5],
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +71,7 @@ pub struct WSec {
     pub height: [f64; 2],
     pub width: [f64; 2],
     pub wall_type: i64,
+    pub parts: Vec<WallPart>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +159,12 @@ impl Track {
             let fs = g
                 .list(s, "f", s.i("f_count"))
                 .into_iter()
-                .map(|f| FSec { id: f.id, dlat: pair(f, "dlat0", "dlat1"), surface: f.i("i15") })
+                .map(|f| FSec {
+                    id: f.id,
+                    dlat: pair(f, "dlat0", "dlat1"),
+                    surface: f.i("i15"),
+                    tex: tex_ref(g, f, ""),
+                })
                 .collect();
             let ws = g
                 .list(s, "w", s.i("w_count"))
@@ -136,6 +175,7 @@ impl Track {
                     height: pair(w, "height0", "height1"),
                     width: pair(w, "width0", "width1"),
                     wall_type: w.i("wall_type"),
+                    parts: wall_parts(g, w),
                 })
                 .collect();
             segments.push(Segment { id: s.id, index, curve: curve && angle != 0.0, start, end, angle, radius, length, xs, fs, ws });
@@ -321,6 +361,40 @@ impl Segment {
         }
         out
     }
+}
+
+/// Texture of a strip or wall face: fields `<prefix>appearance` and `<prefix>coords`.
+fn tex_ref(g: &Graph, n: &Node, prefix: &str) -> Option<TexRef> {
+    let app = g.child(n, &format!("{prefix}appearance"))?;
+    let file = g.child(app, "tex[0]")?.s("file")?.to_string();
+    let coords = g.child(n, &format!("{prefix}coords"))?;
+    let four = |k: usize| -> Option<[f64; 4]> {
+        let hex = coords.s(&format!("a[{k}]"))?;
+        let b: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+        if b.len() < 32 {
+            return None;
+        }
+        let d = |i: usize| f64::from_le_bytes(b[8 * i..8 * i + 8].try_into().unwrap());
+        Some([d(0), d(1), d(2), d(3)])
+    };
+    let (u, v) = (four(0)?, four(1)?);
+    if u.iter().chain(v.iter()).any(|x| !x.is_finite()) {
+        return None;
+    }
+    Some(TexRef { file, uv: [[u[0], v[0]], [u[1], v[1]], [u[2], v[2]], [u[3], v[3]]] })
+}
+
+/// The parts of a wall along its length; part k starts at `sub<k>.d28` (a fraction of the piece).
+fn wall_parts(g: &Graph, w: &Node) -> Vec<WallPart> {
+    let n = w.i("sub_count").max(0) as usize;
+    let starts: Vec<f64> = (0..n).map(|k| w.f(&format!("sub{k}.d28")).clamp(0.0, 1.0)).collect();
+    (0..n)
+        .map(|k| WallPart {
+            from: starts[k],
+            to: starts.get(k + 1).copied().unwrap_or(1.0),
+            faces: std::array::from_fn(|f| tex_ref(g, w, &format!("sub{k}.face{f}."))),
+        })
+        .collect()
 }
 
 /// The placed objects (TSO references) of a track, in file order.

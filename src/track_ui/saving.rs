@@ -199,18 +199,21 @@ impl TrackView {
         if !forward {
             objects::apply_nodes(&mut l.graph, &step.nodes, false);
         }
+        let mut rebuilt = false;
         if step.objects_only {
             l.track.objects = model::objects_from_graph(&l.graph);
         } else if let Ok(t) = Track::from_graph(&l.graph) {
             l.track = t;
-            let mut m = mesh::build(&l.track, self.show_walls);
-            self.scene.lock().unwrap().pending = Some(std::mem::take(&mut m.verts));
-            l.mesh = m;
+            l.mesh = mesh::build(&l.track, self.show_walls);
+            rebuilt = true;
         }
         // Forget selected objects that no longer exist (an Undo of adding them).
         let ids: std::collections::HashSet<i32> = l.track.objects.iter().map(|o| o.id).collect();
         self.obj_sel.retain(|id| ids.contains(id));
         self.objects_dirty = true;
+        if rebuilt {
+            self.upload_mesh();
+        }
         if !step.objects_only {
             self.recheck();
         }

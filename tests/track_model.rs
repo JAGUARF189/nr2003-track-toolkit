@@ -45,3 +45,24 @@ fn hillside_is_one_mile_from_the_dat() {
     assert_eq!(t.objects.len(), 263);
     assert!(t.objects.iter().any(|o| o.file.ends_with(".3do")));
 }
+
+#[test]
+fn martinsville_textures_are_found_and_mapped() {
+    let Some(t) = load("_test/ptfs/martinsville/martinsville.ptf") else { return };
+    let strips = t.segments.iter().flat_map(|s| s.fs.iter()).filter(|f| f.tex.is_some()).count();
+    assert!(strips > 400, "{strips} textured strips");
+    // The stored corners match the layer fields: the first asphalt strip of piece 1 tiles
+    // every 8.19 m across (texel 0.008 x 1024) starting 2.2 m to the right of its edge.
+    let f = t.segments[0].fs.iter().find(|f| f.tex.as_ref().is_some_and(|x| x.file == r"trackmat\asphalt.mip")).unwrap();
+    let tx = f.tex.as_ref().unwrap();
+    assert!((tx.uv[0][0] - (f.dlat[0] + 2.2) / 8.192).abs() < 1e-3, "{:?}", tx.uv);
+    // walls carry their face textures
+    let faces = t.segments.iter().flat_map(|s| s.ws.iter()).flat_map(|w| w.parts.iter()).flat_map(|p| p.faces.iter()).filter(|f| f.is_some()).count();
+    assert!(faces > 100, "{faces} textured wall faces");
+    let m = mesh::build(&t, true);
+    let files = m.textures();
+    let store = ttk::track::textures::TexStore::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("_test/ptfs/martinsville").as_path());
+    let loaded = files.iter().filter(|f| store.load(f, 256).is_some()).count();
+    assert_eq!(loaded, files.len(), "{files:?}");
+    assert_eq!(m.batches.iter().map(|b| b.count as usize).sum::<usize>(), m.verts.len() / mesh::VERTEX_FLOATS);
+}
