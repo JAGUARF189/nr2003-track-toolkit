@@ -183,6 +183,16 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - kinked centerlines
     - turns tighter than the road is wide (the inside is clipped)
     - an endless loop
+  - **What NR2003 needs to load it:** found by testing in the game. Without these it says "Could not load the track".
+    - **No over-gentle curves:** the fit could leave near-straight curves with radii up to 240 km. Installed tracks' gentlest curve is 2,485 m. Curves gentler than 2,000 m become straight / short curve / straight units of the same length and turn, staying within 5 cm of the arc.
+    - **Racing lines that fit:** NR2003 reads the `.lp` files by distance along the lap, one point every 3 m. A template's `.lp` files on a longer track stop it loading. New ones are written for the exact lap. For now they follow the middle of the road at one speed, so AI cars are slow until phase 5.
+    - **Race-control flaggers:** start/finish, pit and stop-go, from the template's own files. 131 of 132 installed tracks have them.
+    - **A `track.ini` for this track:** the template's, made a road course (`track_type = 5`, `chassis_type = 4`) with this track's name and length.
+      - Pit stalls and grid spots come from AC's `AC_PIT_n` / `AC_START_n`, as distance along the lap and to the side.
+      - Any off NR2003's ground are pulled onto it, and missing ones are added after the last.
+    - **Walls** are at most 1.2 m tall; AC's collision walls are often 8 m.
+    - **Install** copies the workspace's `track.ini`, `.lp` files and `<name>.cam` into the game, with backups. The template only fills in what's missing.
+    - Road America (`lilski_road_america`) loads in NR2003 this way.
   - **Point-to-point roads** can't be converted (NR2003 tracks are loops), and the converter says so.
   - **Open-world maps** are refused too: layouts over 40 km round, or needing over 3000 pieces.
 - **Scenery (phase 4):** tick **Bring AC's scenery** (on by default) and AC's buildings, stands, trees, fences and the land beyond the road come along as NR2003 objects with AC's own textures. It needs Papyrus's `make3do` and `makemip` (the Sandbox folder in Settings).
@@ -194,7 +204,9 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - Squares are 150 m, or bigger to keep to 250 object files. Installed tracks use at most 299 different object files.
     - A new run removes the earlier run's `sc_` objects.
     - Big things stop being drawn beyond 800 m, and small things (under 8 m across: cones, people, chairs) beyond 300 m. NR2003's detail slider scales both.
-    - Shapes are split below make3do's limits (16,536 vertices and 32,767 faces per shape, measured).
+    - Shapes are split below make3do's limits: 10,000 vertices and 30,000 faces per shape.
+      - A well-joined grid builds up to 16,536 vertices, but loose triangles fail sooner (Road America's bleachers at 16,000).
+    - Squares over 250,000 triangles are split into quarters (`sc_<x>_<y>_<q>`).
   - **Textures:** each AC texture becomes `ac_<name>.mip` (DXT, tiling, up to 256/512/1024 px, your choice).
     - Opaque materials lose their alpha (AC keeps other data there).
     - Cut-outs (trees, fences) get hard edges and are seen from both sides.

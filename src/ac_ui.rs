@@ -8,7 +8,7 @@ use eframe::egui_glow;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use ttk::ac::{self, AcInfo, AcScene, ViewOptions};
-use ttk::{acconv, acscenery};
+use ttk::{acconv, acscenery, acsupport};
 use ttk::config::Settings;
 use ttk::track::mesh::TrackMesh;
 
@@ -50,6 +50,8 @@ struct Made {
     written: acconv::Written,
     /// None when scenery wasn't asked for.
     scenery: Option<SceneryMade>,
+    /// Flaggers, track.ini and racing-line files (or why they couldn't be made).
+    support: Result<acsupport::Support, String>,
     /// The NR2003 centerline in AC coordinates, to draw over the AC track.
     line: Vec<[f32; 3]>,
 }
@@ -261,6 +263,9 @@ impl AcView {
                 } else {
                     None
                 };
+                say("Adding flaggers, pit stalls and racing-line files…");
+                let support = acsupport::finish(&mut c.graph, &scene, c.report.offset, &template, &template_dir, &out, &name)
+                    .map_err(|e| format!("{e:#}"));
                 say("Saving…");
                 let written = acconv::write_track(&c, &out, &name, &template_dir)?;
                 let installed = install.then(|| {
@@ -295,7 +300,7 @@ impl AcView {
                         line.push([(p[0] + off[0]) as f32, (p[1] + off[1]) as f32, 0.0]);
                     }
                 }
-                Ok(Made { report: c.report, written, scenery: scenery_made, installed, line })
+                Ok(Made { report: c.report, written, scenery: scenery_made, support, installed, line })
             })();
             let _ = std::fs::remove_dir_all(&tex_dir);
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
@@ -442,6 +447,24 @@ impl AcView {
             ui.end_row();
             ui.label("Walls");
             ui.label(format!("{} where AC has walls, {} at the edge of the ground", r.ac_walls, r.safety_walls));
+            ui.end_row();
+            ui.label("For racing");
+            match &m.support {
+                Ok(s) => ui.label(format!(
+                    "{} pit stalls and {} grid spots from AC's markers{}, {} flaggers, track.ini and {} racing-line files for the {:.0} m lap",
+                    s.pits_from_ac,
+                    s.grid_from_ac,
+                    if s.moved_onto_ground > 0 { format!(" ({} moved onto the ground)", s.moved_onto_ground) } else { String::new() },
+                    s.flaggers.len(),
+                    s.lp_files.len(),
+                    s.lap_m
+                ))
+                .on_hover_text(
+                    "NR2003 needs these to load the track. The racing lines follow the middle of the road for now, \
+                     so AI cars will be slow; real racing lines from AC's AI line come in phase 5.",
+                ),
+                Err(e) => ui.colored_label(Color32::from_rgb(235, 95, 85), format!("Couldn't make them: {e}")),
+            };
             ui.end_row();
             if let Some(sc) = &m.scenery {
                 ui.label("Scenery");

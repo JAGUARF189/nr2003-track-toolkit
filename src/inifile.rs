@@ -132,6 +132,18 @@ impl IniDoc {
         }
     }
 
+    /// Section names (lowercase), in file order.
+    pub fn section_names(&self) -> Vec<String> {
+        self.lines.iter().filter_map(|l| section_of_line(l)).collect()
+    }
+
+    /// How many `stall_N = ...` lines `section` has.
+    pub fn stall_count(&self, section: &str) -> usize {
+        self.section_range(section).map_or(0, |(s, e)| {
+            (s + 1..e).filter(|&i| key_of_line(&self.lines[i]).is_some_and(|k| is_stall_key(&k))).count()
+        })
+    }
+
     /// Replace every `stall_N = ...` line in `section` with `new_lines`.
     /// `stall_pace` and all other keys are kept. Returns how many lines were removed.
     pub fn replace_stalls(&mut self, section: &str, new_lines: &[String]) -> usize {

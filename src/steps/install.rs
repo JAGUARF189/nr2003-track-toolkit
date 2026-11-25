@@ -61,6 +61,34 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         }
     }
 
+    // The track's own support files (a converter writes track.ini and .lp files that fit the
+    // track) go in first; differing ones already there are backed up. The template then only
+    // fills in what's still missing.
+    if !same_dir(&td, &gd) {
+        let mut copied = Vec::new();
+        for e in fs::read_dir(&td)?.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let n = file_name(&p);
+            let ours = n.eq_ignore_ascii_case("track.ini") || ext_lower(&p) == "lp" || n.eq_ignore_ascii_case(&format!("{}.cam", ctx.name));
+            if !p.is_file() || !ours {
+                continue;
+            }
+            let dest = gd.join(&n);
+            if dest.is_file() {
+                if fs::read(&dest)? == fs::read(&p)? {
+                    continue;
+                }
+                backup_file(&dest, &gd.join("_ttk_backup"))?;
+            }
+            fs::copy(&p, &dest)?;
+            copied.push(n);
+        }
+        if !copied.is_empty() {
+            copied.sort_by_key(|s| s.to_ascii_lowercase());
+            ctx.log.ok(format!("Copied the track's own {}", copied.join(", ")));
+        }
+    }
+
     if ctx.opts.copy_templates {
         copy_templates(ctx)?;
     }

@@ -46,6 +46,9 @@ pub struct Options {
     pub ground_m: f64,
     /// Pieces at least this long are split where AC's ground changes along them (metres).
     pub min_split_m: f64,
+    /// Tallest a wall may be (metres). AC's collision walls are often several metres tall;
+    /// road courses' walls are mostly 1.1 m (Watkins Glen).
+    pub wall_max_m: f64,
 }
 
 impl Options {
@@ -57,7 +60,7 @@ impl Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { position_m: 0.3, height_m: 0.1, width_m: 0.3, grass_m: 12.0, walls: true, ac_ground: true, ground_m: 30.0, min_split_m: 12.0 }
+        Self { position_m: 0.3, height_m: 0.1, width_m: 0.3, grass_m: 12.0, walls: true, ac_ground: true, ground_m: 30.0, min_split_m: 12.0, wall_max_m: 1.2 }
     }
 }
 
@@ -557,6 +560,64 @@ const MAX_PIECES: usize = 3000;
 
 /// Straights: pieces whose heading barely changes.
 const STRAIGHT_TURN: f64 = 0.35 * PI / 180.0;
+
+/// Largest radius a curve may have. The refinement can shrink a curve's turn to almost nothing
+/// (Road America had 0.004° curves, radius 240 km), and NR2003 won't load such a track
+/// ("Could not load the track"); the gentlest curves in installed tracks are about 2,500 m
+/// (Charlotte Roval 2,485 m, Spa 1,735 m). Gentler ones become straights.
+pub const MAX_RADIUS_M: f64 = 2000.0;
+
+/// Replace every curve gentler than [`MAX_RADIUS_M`] with straight / short tighter curve /
+/// straight units (curves at 3/4 of the limit), keeping its length and total turn, so the lap
+/// keeps its shape (within about 5 cm of the arc) and NR2003 only sees curves like its own.
+/// The pieces are chained again from the first one afterwards.
+pub fn soften_gentle(pieces: &[Piece]) -> Vec<Piece> {
+    let r = 0.75 * MAX_RADIUS_M;
+    let mut out: Vec<Piece> = Vec::with_capacity(pieces.len());
+    for pc in pieces {
+        let turn = pc.h1 - pc.h0;
+        if pc.straight() || turn.abs() * MAX_RADIUS_M >= pc.len {
+            out.push(pc.clone());
+            continue;
+        }
+        // units: straight half, curve, straight half; enough of them that each unit's bend
+        // strays under 5 cm from the arc (about unit length x unit turn / 8)
+        let n = ((pc.len * turn.abs() / (8.0 * 0.05)).sqrt().ceil() as usize).max(1);
+        let (unit, uturn) = (pc.len / n as f64, turn / n as f64);
+        let lc = (uturn.abs() * r).min(unit);
+        let ls = 0.5 * (unit - lc);
+        let mut s0 = pc.s0;
+        let mut h = pc.h0;
+        let mut push = |len: f64, dh: f64, s0: &mut f64, h: &mut f64| {
+            if len <= 1e-6 {
+                return;
+            }
+            out.push(Piece { s0: *s0, len, h0: *h, h1: *h + dh, p0: pc.p0 });
+            *s0 += len;
+            *h += dh;
+        };
+        for _ in 0..n {
+            push(ls, 0.0, &mut s0, &mut h);
+            push(lc, uturn, &mut s0, &mut h);
+            push(ls, 0.0, &mut s0, &mut h);
+        }
+    }
+    // neighbouring straights merge; then chain the start points again
+    let mut merged: Vec<Piece> = Vec::with_capacity(out.len());
+    for pc in out {
+        if let Some(last) = merged.last_mut() {
+            if last.straight() && pc.straight() && (last.h0 - pc.h0).abs() < 1e-12 {
+                last.len += pc.len;
+                continue;
+            }
+        }
+        merged.push(pc);
+    }
+    for k in 1..merged.len() {
+        merged[k].p0 = merged[k - 1].end();
+    }
+    merged
+}
 
 fn classify(h: &[f64], knots: &[usize]) -> (Vec<bool>, Vec<f64>) {
     let mut straight = Vec::new();
@@ -1483,7 +1544,8 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
     report.edges_measured = filled;
     let cl = centerline(&ai, 1.0)?;
     report.length_ac = cl.length();
-    let (mut pieces, worst, mean) = fit_plan(&cl, opt.position_m)?;
+    let (pieces, worst, mean) = fit_plan(&cl, opt.position_m)?;
+    let mut pieces = soften_gentle(&pieces);
     report.worst_m = worst;
     report.mean_m = mean;
     stage(&format!("plan fit, {} pieces, worst {worst:.2} m", pieces.len()));
@@ -1782,10 +1844,10 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
                         (Some(w0), Some(w1)) => {
                             let d = [sign * (w0.0 + wh), sign * (w1.0 + wh)];
                             let ground = |i: usize, ww: (f64, f64)| ww.1 - z_at(i);
-                            let height = (0.5 * (ground(a, w0) + ground(b, w1))).clamp(0.5, 8.0);
+                            let height = (0.5 * (ground(a, w0) + ground(b, w1))).clamp(0.5, opt.wall_max_m.max(0.5));
                             walls.push((d, height, true));
                         }
-                        _ if opt.walls => walls.push(([edge[0] - sign * wh, edge[1] - sign * wh], wall_tpl.f("height0"), false)),
+                        _ if opt.walls => walls.push(([edge[0] - sign * wh, edge[1] - sign * wh], wall_tpl.f("height0").min(opt.wall_max_m), false)),
                         _ => {}
                     }
                 }
@@ -1887,8 +1949,8 @@ pub fn convert(scene: &AcScene, template: &Graph, opt: &Options) -> Result<Conve
                 }
                 let mut walls = Vec::new();
                 if opt.walls {
-                    walls.push(([r_out[0] + wh, r_out[1] + wh], wall_tpl.f("height0"), false));
-                    walls.push(([l_out[0] - wh, l_out[1] - wh], wall_tpl.f("height0"), false));
+                    walls.push(([r_out[0] + wh, r_out[1] + wh], wall_tpl.f("height0").min(opt.wall_max_m), false));
+                    walls.push(([l_out[0] - wh, l_out[1] - wh], wall_tpl.f("height0").min(opt.wall_max_m), false));
                 }
                 Layout { xs, strips, walls, from_ac: false }
             }

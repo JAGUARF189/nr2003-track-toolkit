@@ -112,7 +112,19 @@ fn make_an_nr2003_track_from_mugello() {
         assert!(sc.objects > 100 && sc.mips > 20, "{} objects, {} textures", sc.objects, sc.mips);
         let dir = ws.join("mugello_ac");
         let count = |ext: &str| std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == ext)).count();
-        assert_eq!(count("3do"), sc.objects);
+        let scenery_files = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("sc_")).count();
+        assert_eq!(scenery_files, sc.objects);
+        // what NR2003 needs to load it: flaggers, a road-course track.ini, racing lines for this lap
+        let support = made.support.as_ref().expect("flaggers, track.ini and racing lines made");
+        assert_eq!(support.flaggers.len(), 3, "{support:?}");
+        assert!(dir.join("flagger_pit_0.3do").is_file() && dir.join("flagger_stopgo_0.3do").is_file());
+        assert_eq!(count("lp"), support.lp_files.len());
+        let ini = std::fs::read_to_string(dir.join("track.ini")).unwrap();
+        assert!(ini.contains("track_type = 5") && ini.contains("chassis_type = 4"), "a road course");
+        let lp = std::fs::read(dir.join("race.lp")).unwrap();
+        let n = i32::from_le_bytes(lp[4..8].try_into().unwrap()) as usize;
+        let last = f32::from_le_bytes(lp[8 + 24 * (n - 1) + 16..8 + 24 * (n - 1) + 20].try_into().unwrap()) as f64;
+        assert!((3.0 * (n - 1) as f64 + last - made.report.length_nr).abs() < 0.05, "the racing lines cover exactly the lap");
         assert!(count("mip") >= sc.mips);
         let g = ttk::track::graph::read_ptf_file(&ptf).unwrap();
         let t = ttk::track::model::Track::from_graph(&g).unwrap();

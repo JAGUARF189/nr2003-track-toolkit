@@ -75,6 +75,8 @@ fn main() -> anyhow::Result<()> {
         println!("  problem: {p}");
     }
     let placed = acscenery::place(&mut c.graph, &built)?;
+    let sup = ttk::acsupport::finish(&mut c.graph, &scene, c.report.offset, &template, &tpl_dir, &out, &a[5])?;
+    println!("support: {} pits and {} grid spots from AC ({} moved onto the ground), flaggers {:?} (missing {:?}), {} .lp files, lap {:.1} m", sup.pits_from_ac, sup.grid_from_ac, sup.moved_onto_ground, sup.flaggers, sup.flaggers_missing, sup.lp_files.len(), sup.lap_m);
     let w = acconv::write_track(&c, &out, &a[5], &tpl_dir)?;
     let _ = std::fs::remove_dir_all(&tex_dir);
     println!("placed {placed} objects; saved {} ({:.1}s)", w.ptf.display(), t0.elapsed().as_secs_f64());

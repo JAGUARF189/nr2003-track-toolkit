@@ -39,6 +39,9 @@ fn convert_and_check(name: &str, layout: &str) {
     assert!((r.length_nr - r.length_ac).abs() / r.length_ac < 0.005);
     // closes: last piece ends where the first starts, no kinks
     let t = track::model::Track::from_graph(&c.graph).unwrap();
+    // no curve gentler than NR2003 can take (the 240 km curves that stopped Road America loading)
+    let gentlest = t.segments.iter().filter(|s| s.curve).map(|s| s.radius).fold(0.0, f64::max);
+    assert!(gentlest <= acconv::MAX_RADIUS_M + 1.0, "a curve of radius {gentlest:.0} m");
     let (a, b) = (t.segments.last().unwrap(), &t.segments[0]);
     assert!((a.end[0] - b.start[0]).hypot(a.end[1] - b.start[1]) < 0.02);
     // the ground's outer edges agree where pieces meet

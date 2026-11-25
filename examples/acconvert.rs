@@ -15,8 +15,10 @@ fn main() -> anyhow::Result<()> {
     let (bytes, _) = track::graph::load_ptf_bytes(&tpl_file)?;
     let template = track::graph::parse_ptf(&bytes)?;
     let opt = if a.iter().any(|x| x == "--fewer") { acconv::Options::fewer_pieces() } else { acconv::Options::default() };
-    let c = acconv::convert(&scene, &template, &opt)?;
+    let mut c = acconv::convert(&scene, &template, &opt)?;
     println!("{:#?}", c.report);
+    let sup = ttk::acsupport::finish(&mut c.graph, &scene, c.report.offset, &template, &tpl_dir, &out, &a[5])?;
+    println!("support: {} pits and {} grid spots from AC ({} moved onto the ground), flaggers {:?} (missing {:?}), {} .lp files, lap {:.1} m", sup.pits_from_ac, sup.grid_from_ac, sup.moved_onto_ground, sup.flaggers, sup.flaggers_missing, sup.lp_files.len(), sup.lap_m);
     let w = acconv::write_track(&c, &out, name, &tpl_dir)?;
     println!("wrote {} ({} textures copied, missing {:?})", w.ptf.display(), w.copied.len(), w.missing);
     Ok(())

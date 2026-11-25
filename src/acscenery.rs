@@ -32,10 +32,92 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+/// Most triangles in one object. make3do built squares of about 200,000 triangles but failed
+/// ("Could not write out 3do file") on Road America's densest, about 1 million (its tyre walls,
+/// 1.6 million triangles in all); heavier squares are split into quarters.
+pub const MAX_CELL_TRIANGLES: usize = 250_000;
+
+/// Split a square into quarters (by where each triangle's middle is), again and again, until
+/// every part has at most `max` triangles. Parts keep the square's centre and get `_0`.. `_3`.
+fn split_heavy(cell: Cell, max: usize) -> Vec<Cell> {
+    if cell.triangles() <= max {
+        return vec![cell];
+    }
+    let mut parts: Vec<Vec<Shape>> = vec![Vec::new(); 4];
+    let mut moved = false;
+    for sh in &cell.shapes {
+        // per quarter: a new shape with the vertices it uses
+        let mut q_shapes: Vec<Shape> = (0..4).map(|_| Shape { material: sh.material, small: sh.small, ..Default::default() }).collect();
+        let mut maps: Vec<HashMap<u32, u32>> = vec![HashMap::new(); 4];
+        for t in &sh.tris {
+            let c: [f32; 2] = std::array::from_fn(|k| (sh.verts[t[0] as usize][k] + sh.verts[t[1] as usize][k] + sh.verts[t[2] as usize][k]) / 3.0);
+            let q = (c[0] >= 0.0) as usize + 2 * (c[1] >= 0.0) as usize;
+            let mut idx = [0u32; 3];
+            for (k, &vi) in t.iter().enumerate() {
+                idx[k] = *maps[q].entry(vi).or_insert_with(|| {
+                    q_shapes[q].verts.push(sh.verts[vi as usize]);
+                    (q_shapes[q].verts.len() - 1) as u32
+                });
+            }
+            q_shapes[q].tris.push(idx);
+        }
+        for (q, qs) in q_shapes.into_iter().enumerate() {
+            if !qs.tris.is_empty() {
+                parts[q].push(qs);
+            }
+        }
+    }
+    let total = cell.triangles();
+    for p in &parts {
+        moved |= p.iter().map(|s| s.tris.len()).sum::<usize>() < total;
+    }
+    if !moved {
+        return vec![cell]; // everything sits in one quarter; splitting can't help
+    }
+    let mut out = Vec::new();
+    for (q, shapes) in parts.into_iter().enumerate() {
+        if shapes.is_empty() {
+            continue;
+        }
+        // re-centre the quarter so its own quarters split it again
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for sh in &shapes {
+            for v in &sh.verts {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(v[k]);
+                    hi[k] = hi[k].max(v[k]);
+                }
+            }
+        }
+        let mid = [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])];
+        let shapes: Vec<Shape> = shapes
+            .into_iter()
+            .map(|mut sh| {
+                for v in &mut sh.verts {
+                    v[0] -= mid[0];
+                    v[1] -= mid[1];
+                }
+                sh
+            })
+            .collect();
+        let part = Cell {
+            name: format!("{}_{q}", cell.name),
+            centre: [cell.centre[0] + mid[0] as f64, cell.centre[1] + mid[1] as f64, cell.centre[2]],
+            shapes,
+        };
+        out.extend(split_heavy(part, max));
+    }
+    out
+}
+
 /// Most faces in one shape (make3do fails at 32768).
 pub const MAX_SHAPE_FACES: usize = 30_000;
-/// Most vertices in one shape (make3do fails at 16538).
-pub const MAX_SHAPE_VERTS: usize = 16_000;
+/// Most vertices in one shape.
+// A well-joined grid builds up to 16,536 vertices, but meshes of loose triangles fail sooner:
+// Road America's bleachers (16,000 vertices, 8,240 faces) gave "Could not write out 3do file",
+// as did 16,998 loose vertices (5,666 faces). make3do's limit is on its triangle-strip output,
+// so shapes stay well below.
+pub const MAX_SHAPE_VERTS: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -232,9 +314,11 @@ fn mip_name(source: &str, alpha: bool, taken: &mut Vec<String>) -> String {
 pub fn plan(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, opt: &Options) -> Plan {
     let mut o = opt.clone();
     loop {
-        let p = plan_cells(scene, track, offset, height_base, &o);
+        let mut p = plan_cells(scene, track, offset, height_base, &o);
         let n = p.cells.len();
         if n <= opt.max_objects.max(1) || o.cell_m >= 3000.0 {
+            // squares too heavy for make3do are split into quarters until they aren't
+            p.cells = p.cells.into_iter().flat_map(|c| split_heavy(c, MAX_CELL_TRIANGLES)).collect();
             return p;
         }
         // squares' count goes roughly with 1 / size²
@@ -607,7 +691,9 @@ pub fn build(
         let ours = n.strip_prefix("sc_").and_then(|r| r.strip_suffix(".3do")).is_some_and(|r| {
             let mut parts = r.split('_');
             let ok = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-            ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
+            // sc_<x>_<y>, and parts of split squares: sc_<x>_<y>_<q>...
+            let n = parts.clone().count();
+            n >= 2 && parts.all(|p| ok(Some(p)))
         });
         if ours && e.path().is_file() {
             let _ = std::fs::remove_file(e.path());
