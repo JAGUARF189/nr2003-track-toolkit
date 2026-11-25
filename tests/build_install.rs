@@ -23,6 +23,7 @@ fn builds_and_installs_into_the_game_folder() {
     std::fs::write(tpl.join("track.ini"), "[track]\ntrack_name = TEMPLATE\ntrack_name_short = tpl\n").unwrap();
     std::fs::write(tpl.join("tpl.cam"), b"cam").unwrap();
     std::fs::write(tpl.join("race.lp"), b"lp").unwrap();
+    std::fs::write(tpl.join("tpl.ptf"), b"the template's own layout").unwrap();
     // the shared textures already unpacked in the workspace
     std::fs::create_dir_all(ws.join("shared")).unwrap();
     std::fs::write(ws.join("shared").join(".ttk_unpacked"), b"").unwrap();
@@ -43,8 +44,15 @@ fn builds_and_installs_into_the_game_folder() {
         }
     });
 
-    steps::build_and_install(&settings, name, &log).unwrap();
+    // a different track file already lying loose where the track goes (an earlier bad install)
     let inst = game.join("tracks").join(name);
+    std::fs::create_dir_all(&inst).unwrap();
+    std::fs::write(inst.join(format!("{name}.ptf")), b"someone else's layout").unwrap();
+
+    steps::build_and_install(&settings, name, &log).unwrap();
+    assert!(!inst.join(format!("{name}.ptf")).exists(), "the loose layout NR2003 would load instead is moved aside");
+    assert!(inst.join("_ttk_backup").is_dir(), "into the backup folder");
+    assert!(!inst.join("tpl.ptf").exists(), "the template's layout is never copied");
     assert!(inst.join(format!("{name}.dat")).is_file(), "the .dat is installed");
     assert!(inst.join(format!("{name}.cam")).is_file() && inst.join("race.lp").is_file(), "support files from the template");
     let ini = std::fs::read_to_string(inst.join("track.ini")).unwrap();

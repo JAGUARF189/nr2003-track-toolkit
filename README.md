@@ -172,6 +172,7 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
   - **Fully automated (option):** tick **Then build and install it into NR2003** and the button becomes **Make, build and install**. After making the track it runs every Build track step (textures, models, pack the `.dat`) and installs it into NR2003's tracks folder.
     - `track.ini`, cameras and `.lp` files come from your template track when the track has none. The `.lp` files are placeholders until phase 5.
     - An installed `.dat` is backed up before it's replaced.
+    - The template's `.ptf` is never copied. A different loose `<name>.ptf` already in the game folder is moved to `_ttk_backup`, because NR2003 reads a loose `.ptf` before the one in the `.dat`.
     - It won't install while NR2003 or any program from its folder is running.
     - `steps::build_and_install` does the same for any workspace track.
   - **After converting:** **Look at it** opens the result in the Look at a track tab, and an orange line shows it over the AC track. To try it in NR2003, use Build track with the same name.
@@ -189,7 +190,9 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - the track itself (AC's driving surfaces and walls; NR2003 makes its own);
     - AC's 3D grass tufts (NR2003's grass ground stands in for them);
     - triangles lying on NR2003's own ground (AC's visual road, kerb and grass layers).
-  - **Objects:** the rest is cut into 150 m map squares, one `.3do` each (`sc_<x>_<y>.3do`), placed once at the square's centre.
+  - **Objects:** the rest is cut into map squares, one `.3do` each (`sc_<x>_<y>.3do`), placed once at the square's centre.
+    - Squares are 150 m, or bigger to keep to 250 object files. Installed tracks use at most 299 different object files.
+    - A new run removes the earlier run's `sc_` objects.
     - Big things stop being drawn beyond 800 m, and small things (under 8 m across: cones, people, chairs) beyond 300 m. NR2003's detail slider scales both.
     - Shapes are split below make3do's limits (16,536 vertices and 32,767 faces per shape, measured).
   - **Textures:** each AC texture becomes `ac_<name>.mip` (DXT, tiling, up to 256/512/1024 px, your choice).

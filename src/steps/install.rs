@@ -45,6 +45,22 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         ));
     }
 
+    // A loose <name>.ptf in the game folder is read instead of the one in the .dat. If it isn't
+    // this track's, move it aside (to _ttk_backup) so the game loads what was just built.
+    if !same_dir(&td, &gd) {
+        let ptf = format!("{}.ptf", ctx.name);
+        let (loose, ours) = (gd.join(&ptf), td.join(&ptf));
+        if loose.is_file() && ours.is_file() && fs::read(&loose)? != fs::read(&ours)? {
+            let b = backup_file(&loose, &gd.join("_ttk_backup"))?;
+            fs::remove_file(&loose).with_context(|| format!("moving {} aside", loose.display()))?;
+            ctx.log.warn(format!(
+                "A different {ptf} was lying loose in the game folder, and NR2003 would have loaded it instead of this build. \
+                 It's moved to {}.",
+                b.display()
+            ));
+        }
+    }
+
     if ctx.opts.copy_templates {
         copy_templates(ctx)?;
     }
@@ -90,7 +106,10 @@ fn copy_templates(ctx: &Ctx) -> Result<()> {
             continue;
         }
         let ext = ext_lower(&p);
-        if matches!(ext.as_str(), "dat" | "bak" | "log" | "def") {
+        // Never the template's layout: NR2003 reads a loose <name>.ptf before the one in the
+        // .dat, so a copied template .ptf would replace this track with the template's
+        // (that's how an AC conversion came up as Atlanta and "Could not load the track").
+        if matches!(ext.as_str(), "dat" | "bak" | "log" | "def" | "ptf") {
             continue;
         }
         // <template>.cam -> <name>.cam; everything else keeps its name.

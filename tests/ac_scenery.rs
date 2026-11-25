@@ -42,6 +42,8 @@ fn check(name: &str) {
         st.meshes, st.meshes_small, st.triangles, st.on_ground, plan.cells.len(), plan.textures.len()
     );
     assert!(!plan.cells.is_empty());
+    assert!(plan.cells.len() <= opt.max_objects, "{} objects, squares {:.0} m", plan.cells.len(), st.cell_m);
+    eprintln!("  squares {:.0} m", st.cell_m);
 
     // within make3do's limits, every index in range, names unique
     let mut names = std::collections::HashSet::new();

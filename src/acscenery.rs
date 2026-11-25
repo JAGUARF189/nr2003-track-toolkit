@@ -54,11 +54,15 @@ pub struct Options {
     pub on_ground_m: f64,
     /// Keep the .pas/.psg files make3do was given (for editing in Blender).
     pub keep_pas: bool,
+    /// Most object files (squares). Installed tracks use at most 299 different object files
+    /// (Charlotte_2018_BBMC_Day; Las Vegas 255), so the squares grow until there are at most
+    /// this many.
+    pub max_objects: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { cell_m: 150.0, lod_m: 800.0, detail_lod_m: 300.0, small_m: 8.0, tex_side: 512, two_sided_cutouts: true, on_ground_m: 0.5, keep_pas: false }
+        Self { cell_m: 150.0, lod_m: 800.0, detail_lod_m: 300.0, small_m: 8.0, tex_side: 512, two_sided_cutouts: true, on_ground_m: 0.5, keep_pas: false, max_objects: 250 }
     }
 }
 
@@ -130,6 +134,8 @@ pub struct Stats {
     pub on_ground: usize,
     /// Triangles with no area.
     pub degenerate: usize,
+    /// Size of the squares used (metres): `cell_m`, or bigger to stay within `max_objects`.
+    pub cell_m: f64,
 }
 
 pub struct Plan {
@@ -220,11 +226,25 @@ fn mip_name(source: &str, alpha: bool, taken: &mut Vec<String>) -> String {
     name
 }
 
-/// Which AC triangles become scenery, cut into map squares. `offset` and `height_base` are the
-/// converter's shifts from AC's coordinates to the NR2003 track's (`acconv::Report`).
+/// Which AC triangles become scenery, cut into map squares (at least `cell_m`, bigger if that
+/// would make more than `max_objects` objects). `offset` and `height_base` are the converter's
+/// shifts from AC's coordinates to the NR2003 track's (`acconv::Report`).
 pub fn plan(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, opt: &Options) -> Plan {
+    let mut o = opt.clone();
+    loop {
+        let p = plan_cells(scene, track, offset, height_base, &o);
+        let n = p.cells.len();
+        if n <= opt.max_objects.max(1) || o.cell_m >= 3000.0 {
+            return p;
+        }
+        // squares' count goes roughly with 1 / size²
+        o.cell_m = (o.cell_m * (n as f64 / opt.max_objects.max(1) as f64).sqrt() * 1.05).min(3000.0);
+    }
+}
+
+fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, opt: &Options) -> Plan {
     let ground = NrGround::new(track);
-    let mut stats = Stats::default();
+    let mut stats = Stats { cell_m: opt.cell_m, ..Default::default() };
 
     // materials NR2003 will see: one per (AC material); textures one per (texture, alpha use)
     let mut materials = Vec::new();
@@ -580,6 +600,19 @@ pub fn build(
         }
     }
     std::fs::create_dir_all(track_dir).with_context(|| format!("creating {}", track_dir.display()))?;
+    // objects from an earlier run (named sc_<x>_<y>.3do by this converter) would otherwise be
+    // packed into the .dat unused when the squares come out differently
+    for e in std::fs::read_dir(track_dir).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+        let ours = n.strip_prefix("sc_").and_then(|r| r.strip_suffix(".3do")).is_some_and(|r| {
+            let mut parts = r.split('_');
+            let ok = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+            ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
+        });
+        if ours && e.path().is_file() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     let work = track_dir.join("_ttk_scenery");
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
