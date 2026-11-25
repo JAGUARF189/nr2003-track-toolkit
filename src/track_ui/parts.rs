@@ -107,6 +107,11 @@ pub(super) fn part_outline(s: &model::Segment, id: i32) -> Vec<[f64; 3]> {
     pts
 }
 
+/// The texture lists' entry for making a texture from a picture.
+const PICTURE_ENTRY: &str = "A picture (PNG, JPG, WebP)…";
+const PICTURE_TIP: &str = "Makes a texture from a picture with Papyrus's makemip and puts it in the track's trackmat folder. \
+     It's sized to powers of two (up to 1024 px) and tiles like the stock ground textures.";
+
 impl TrackView {
     /// Number changes to a wall or strip as one undoable step (old values read from the graph).
     fn part_changes(&mut self, label: &str, key: &str, changes: Vec<Change>, nodes: Vec<NodeEdit>) {
@@ -381,6 +386,7 @@ impl TrackView {
         let textures = surface::track_textures(&l.graph);
         let mut chosen: Option<i32> = None;
         let mut other = false;
+        let mut picture = false;
         ui.horizontal(|ui| {
             ui.label("Texture").on_hover_text(if faces.len() > 1 {
                 "Sets the texture on every side of the wall"
@@ -397,11 +403,15 @@ impl TrackView {
                 if ui.selectable_label(false, "Another .mip file…").clicked() {
                     other = true;
                 }
+                if ui.selectable_label(false, PICTURE_ENTRY).on_hover_text(PICTURE_TIP).clicked() {
+                    picture = true;
+                }
             });
         });
         // Replace everywhere: the same swap on every strip and wall showing this texture
         let mut replace: Option<i32> = None;
         let mut replace_other = false;
+        let mut replace_picture = false;
         let everywhere = if names.len() == 1 { surface::faces_using(&l.graph, &names[0]) } else { Vec::new() };
         if !everywhere.is_empty() {
             ui.horizontal(|ui| {
@@ -423,6 +433,9 @@ impl TrackView {
                     if ui.selectable_label(false, "Another .mip file…").clicked() {
                         replace_other = true;
                     }
+                    if ui.selectable_label(false, PICTURE_ENTRY).on_hover_text(PICTURE_TIP).clicked() {
+                        replace_picture = true;
+                    }
                 });
             });
         }
@@ -432,16 +445,54 @@ impl TrackView {
         if other {
             self.pick_texture_file(&apps);
         }
+        if picture {
+            self.pick_picture(&apps);
+        }
         if let Some(t) = replace {
             self.part_changes("Replace a texture everywhere", "", surface::set_texture(&everywhere, t), Vec::new());
             self.part_note = Some(format!("Replaced {} on {} strips and wall sides.", names[0], everywhere.len()));
         }
-        if replace_other && self.pick_texture_file(&everywhere) {
+        if (replace_other && self.pick_texture_file(&everywhere)) || (replace_picture && self.pick_picture(&everywhere)) {
             let n = format!("Replaced {} on {} strips and wall sides.", names[0], everywhere.len());
             self.part_note = Some(match self.part_note.take() {
                 Some(t) => format!("{n} {t}"),
                 None => n,
             });
+        }
+    }
+
+    /// Pick a picture (PNG, JPEG, WebP...), make it a .mip in the track's trackmat folder and
+    /// put it on faces `apps`. True if they were changed.
+    fn pick_picture(&mut self, apps: &[i32]) -> bool {
+        let Some(l) = &self.loaded else { return false };
+        let Some(folder) = l.folder.clone() else {
+            self.edit_error = Some("Save the track first, so there's a folder for the texture.".into());
+            return false;
+        };
+        let Some(file) = rfd::FileDialog::new()
+            .set_title("Pick a picture to make into a texture")
+            .add_filter("Picture (PNG, JPG, WebP)", surface::PICTURE_TYPES)
+            .pick_file()
+        else {
+            return false;
+        };
+        match surface::picture_to_mip(&self.sandbox_dir, &file, &folder) {
+            Ok((name, notes)) => {
+                let Some(l) = &self.loaded else { return false };
+                let (node, tex) = surface::texture_for_file(&l.graph, &name);
+                self.part_changes("Change texture", "", surface::set_texture(apps, tex), node.into_iter().collect());
+                let mut note = format!("Made {name} from {}.", ttk::util::file_name(&file));
+                for n in notes {
+                    note.push(' ');
+                    note.push_str(&n);
+                }
+                self.part_note = Some(note);
+                true
+            }
+            Err(e) => {
+                self.edit_error = Some(format!("{e:#}"));
+                false
+            }
         }
     }
 

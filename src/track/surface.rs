@@ -364,6 +364,41 @@ pub fn texture_for_file(g: &Graph, file: &str) -> (Option<NodeEdit>, i32) {
 /// Make a .mip file available to the track: the name to use for it, and whether it was copied.
 /// Files already in the track folder (or its `trackmat` folder) are used where they are;
 /// others are copied into `trackmat\`, never over a file that's already there.
+/// Picture files [`picture_to_mip`] reads.
+pub const PICTURE_TYPES: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tga"];
+
+/// Turn a picture (PNG, JPEG, WebP, BMP or TGA) into a ground texture in the track's `trackmat`
+/// folder, with Papyrus's makemip from `sandbox_dir`: powers of two with the longer side at most
+/// 1024 px, DXT, tiling, like the stock ground textures. A file of the same name is never
+/// overwritten (the new one gets `_2`, `_3`...). Returns the name as the track refers to it
+/// (`trackmat\<name>.mip`) and plain notes about what was done to the picture.
+pub fn picture_to_mip(sandbox_dir: &Path, picture: &Path, track_dir: &Path) -> Result<(String, Vec<String>)> {
+    use crate::mip::build::{build_image, safe_stem, Recipe};
+    if !sandbox_dir.join("makemip.exe").is_file() {
+        bail!("makemip.exe wasn't found in {} (set the Sandbox folder in Settings)", sandbox_dir.display());
+    }
+    let img = image::open(picture)
+        .with_context(|| format!("can't read {} as a picture", crate::util::file_name(picture)))?
+        .to_rgba8();
+    let tm = track_dir.join("trackmat");
+    std::fs::create_dir_all(&tm).with_context(|| format!("creating {}", tm.display()))?;
+    let stem = picture.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = safe_stem(&stem).to_ascii_lowercase();
+    let mut name = format!("{stem}.mip");
+    let mut k = 2;
+    while tm.join(&name).exists() {
+        name = format!("{stem}_{k}.mip");
+        k += 1;
+    }
+    let mut recipe = Recipe::new_texture(true, false);
+    recipe.size = Some(crate::acscenery::mip_size(img.width(), img.height(), 1024));
+    let work = tm.join("_ttk_work");
+    let built = build_image(sandbox_dir, img, &tm.join(&name), &recipe, &work);
+    let _ = std::fs::remove_dir_all(&work);
+    let built = built?;
+    Ok((format!("trackmat\\{name}"), built.notes))
+}
+
 pub fn bring_in_texture(src: &Path, track_dir: &Path) -> Result<(String, Option<String>)> {
     let name = crate::util::file_name(src).to_string();
     let parent = src.parent().and_then(|p| p.canonicalize().ok());

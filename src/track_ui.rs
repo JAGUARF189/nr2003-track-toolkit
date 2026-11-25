@@ -123,6 +123,8 @@ pub struct TrackView {
     /// The part `copy_to` was suggested for.
     copy_for: Option<i32>,
     part_note: Option<String>,
+    /// Papyrus's tools (makemip for pictures made into textures), from Settings.
+    sandbox_dir: PathBuf,
     /// Scroll the side panel to the wall/strip editor (after picking one on the map).
     scroll_part: bool,
     /// Wall (true) or strip number to pick once loaded (command line).
@@ -175,6 +177,7 @@ impl Default for TrackView {
             copy_to: (1, 1),
             copy_for: None,
             part_note: None,
+            sandbox_dir: PathBuf::new(),
             scroll_part: false,
             part_on_load: None,
             cam_on_load: (None, None, None),
@@ -377,6 +380,7 @@ impl TrackView {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, env: &TrackEnv, settings: &mut Settings) {
+        self.sandbox_dir = settings.sandbox_dir.clone();
         self.poll();
         self.workspace = Some(env.workspace.to_path_buf());
         if self.loaded.is_some() && self.ed.pending.is_none() {

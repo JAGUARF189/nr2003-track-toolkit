@@ -239,3 +239,38 @@ fn a_wall_moved_past_another_keeps_the_order() {
     assert_eq!(t.segments[k].ws.last().unwrap().id, w.id);
     round_trip(&g, "resort");
 }
+
+#[test]
+fn pictures_become_ground_textures() {
+    let sandbox = ttk::config::Settings::default().sandbox_dir;
+    if !sandbox.join("makemip.exe").is_file() {
+        eprintln!("skipping: makemip.exe isn't installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ttk_pic2mip_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // a 300 x 200 picture: red left half, blue right half
+    let img = image::RgbImage::from_fn(300, 200, |x, _| if x < 150 { image::Rgb([220, 30, 30]) } else { image::Rgb([30, 30, 220]) });
+    for ext in ["png", "jpg", "webp"] {
+        let pic = dir.join(format!("My Grass.{ext}"));
+        img.save(&pic).unwrap();
+        let (name, notes) = ttk::track::surface::picture_to_mip(&sandbox, &pic, &dir).unwrap();
+        let expect = if ext == "png" { "trackmat\\my_grass.mip".to_string() } else { format!("trackmat\\my_grass_{}.mip", if ext == "jpg" { 2 } else { 3 }) };
+        assert_eq!(name, expect, "never overwrites");
+        assert!(notes.iter().any(|n| n.contains("256")), "{notes:?}");
+        let m = ttk::mip::Mip::open(&dir.join(name.replace('\\', "/"))).unwrap();
+        assert_eq!((m.info.width, m.info.height), (256, 256));
+        assert_eq!(m.info.mapping, 0, "tiles like the stock ground textures");
+        let px = m.decode_largest().unwrap();
+        let (l, r) = (px.get_pixel(40, 128).0, px.get_pixel(216, 128).0);
+        assert!(l[0] > 150 && l[2] < 90, "left stays red: {l:?} ({ext})");
+        assert!(r[2] > 150 && r[0] < 90, "right stays blue: {r:?} ({ext})");
+    }
+    // the track can use it
+    let g = ttk::track::graph::read_ptf_file(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("_test/ptfs/martinsville/martinsville.ptf")).unwrap();
+    let (node, _) = ttk::track::surface::texture_for_file(&g, "trackmat\\my_grass.mip");
+    assert!(node.is_some(), "a new texture entry for the track");
+    assert!(!dir.join("trackmat").join("_ttk_work").exists(), "work files cleaned up");
+    let _ = std::fs::remove_dir_all(&dir);
+}

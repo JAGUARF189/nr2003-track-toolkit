@@ -73,6 +73,7 @@ Click the track on the map: that picks the piece and the wall or ground strip un
 - **Textures:**
   - **Picking:** choose any texture the track already uses, or **Another .mip file…**, which copies the file into the track's `trackmat` folder and never overwrites anything.
   - **Only this wall or strip changes:** each face has its own texture settings, and the texture files stay shared.
+  - **From a picture:** both lists have **A picture (PNG, JPG, WebP)…**. It makes a `.mip` with Papyrus's makemip in the track's `trackmat` folder: powers of two up to 1024 px, DXT, tiling like the stock ground textures. It never overwrites a file (`_2`, `_3`...).
   - **Replace everywhere:** swaps the picked wall's or strip's texture for another on every strip and wall side that uses it, in one step. One Undo puts them all back.
 - **Copy to pieces A to B:**
   - **A wall** gives the wall on the same side of each of those pieces its type, height, thickness and texture.
