@@ -152,6 +152,55 @@ pub fn validate_track_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Programs from the NR2003 folder that are running now (the game or one of its many builds:
+/// NR2003.exe, CUP_2026.exe...). Installing while one runs could clash with files it has open.
+pub fn game_programs_running(settings: &Settings) -> Vec<String> {
+    let ours: Vec<String> = std::fs::read_dir(&settings.nr2003_dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.to_ascii_lowercase().ends_with(".exe"))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ours.is_empty() {
+        return Vec::new();
+    }
+    let mut cmd = std::process::Command::new("tasklist");
+    cmd.args(["/FO", "CSV", "/NH"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let Ok(out) = cmd.output() else { return Vec::new() };
+    let list = String::from_utf8_lossy(&out.stdout);
+    let mut running: Vec<String> = list
+        .lines()
+        .filter_map(|l| l.split(',').next())
+        .map(|n| n.trim_matches('"').to_string())
+        .filter(|n| ours.iter().any(|o| o.eq_ignore_ascii_case(n)))
+        .collect();
+    running.sort();
+    running.dedup();
+    running
+}
+
+/// Build a workspace track all the way into NR2003: every step "Run all" does (workspace,
+/// textures, models, pack, install, and pit stalls if set), with the track's own options.
+/// Refuses while the game is running.
+pub fn build_and_install(settings: &Settings, name: &str, log: &Logger) -> Result<()> {
+    validate_track_name(name)?;
+    let running = game_programs_running(settings);
+    if !running.is_empty() {
+        bail!("{} is running. Close it, then build again (Build track tab)", running.join(", "));
+    }
+    let opts = TrackOpts::load(&settings.track_dir(name));
+    let cancel = AtomicBool::new(false);
+    let ctx = Ctx { settings, name, opts: &opts, log, cancel: &cancel };
+    run_steps(&run_all_steps(&opts), &ctx, |_, _| {})
+}
+
 /// Run `steps` in order, stopping at the first failure.
 /// `on_event(step, None)` fires when a step starts, `Some(result)` when it ends.
 pub fn run_steps(

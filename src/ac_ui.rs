@@ -33,8 +33,19 @@ struct SceneryMade {
     problems: Vec<String>,
 }
 
+/// How "build and install" went.
+struct Installed {
+    ok: bool,
+    /// Where it went in NR2003 (on success), or what stopped it.
+    message: String,
+    /// The build's warnings (e.g. placeholder .lp files), plain text.
+    warnings: Vec<String>,
+}
+
 /// A finished conversion.
 struct Made {
+    /// None when building and installing wasn't asked for.
+    installed: Option<Installed>,
     report: acconv::Report,
     written: acconv::Written,
     /// None when scenery wasn't asked for.
@@ -75,6 +86,8 @@ pub struct AcView {
     /// Bring AC's scenery as NR2003 objects, with textures up to `scenery_tex` pixels.
     scenery: bool,
     scenery_tex: u32,
+    /// Then build the track and install it into NR2003 (fully automated).
+    install: bool,
     /// What the conversion is doing now (shown by the spinner).
     stage: Arc<Mutex<String>>,
     /// A track file for the Track tab to open (after "Look at it").
@@ -111,6 +124,7 @@ impl Default for AcView {
             fewer: false,
             scenery: true,
             scenery_tex: 512,
+            install: false,
             stage: Arc::new(Mutex::new(String::new())),
             open_request: None,
         }
@@ -202,6 +216,8 @@ impl AcView {
         let scenery = self.scenery;
         let sopt = acscenery::Options { tex_side: self.scenery_tex, ..Default::default() };
         let sandbox = settings.sandbox_dir.clone();
+        let install = self.install;
+        let all_settings = settings.clone();
         let stage = self.stage.clone();
         *stage.lock().unwrap() = "Reading the AC track…".into();
         let (tx, rx) = mpsc::channel();
@@ -247,6 +263,29 @@ impl AcView {
                 };
                 say("Saving…");
                 let written = acconv::write_track(&c, &out, &name, &template_dir)?;
+                let installed = install.then(|| {
+                    say("Building and installing into NR2003…");
+                    let warnings = Arc::new(Mutex::new(Vec::new()));
+                    let (w2, stage2, ctx3) = (warnings.clone(), stage.clone(), ctx2.clone());
+                    let log = ttk::logger::Logger::new(move |level, msg| match level {
+                        ttk::logger::Level::Warn => w2.lock().unwrap().push(msg),
+                        ttk::logger::Level::Step => {
+                            *stage2.lock().unwrap() = format!("Building and installing: {}", msg.trim_matches(|c| c == '=' || c == ' '));
+                            ctx3.request_repaint();
+                        }
+                        _ => {}
+                    });
+                    let r = ttk::steps::build_and_install(&all_settings, &name, &log);
+                    let warnings = warnings.lock().unwrap().clone();
+                    match r {
+                        Ok(()) => Installed {
+                            ok: true,
+                            message: format!("Installed into {}", all_settings.game_tracks().join(&name).display()),
+                            warnings,
+                        },
+                        Err(e) => Installed { ok: false, message: format!("{e:#}"), warnings },
+                    }
+                });
                 let off = c.report.offset;
                 let mut line = Vec::new();
                 for s in &t.segments {
@@ -256,7 +295,7 @@ impl AcView {
                         line.push([(p[0] + off[0]) as f32, (p[1] + off[1]) as f32, 0.0]);
                     }
                 }
-                Ok(Made { report: c.report, written, scenery: scenery_made, line })
+                Ok(Made { report: c.report, written, scenery: scenery_made, installed, line })
             })();
             let _ = std::fs::remove_dir_all(&tex_dir);
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
@@ -348,7 +387,12 @@ impl AcView {
                 .on_hover_text("Bigger is sharper but uses more of the graphics card's memory. 512 suits most tracks.");
             });
         });
-        let go = egui::Button::new(RichText::new("Make NR2003 track").size(15.0).strong());
+        ui.checkbox(&mut self.install, "Then build and install it into NR2003").on_hover_text(
+            "Fully automated: after making the track, runs every Build track step (textures, models, pack the .dat) \
+             and installs it into NR2003's tracks folder, with track.ini, cameras and .lp files from your template track \
+             when it has none. Nothing there is overwritten without a backup. It won't install while NR2003 is running.",
+        );
+        let go = egui::Button::new(RichText::new(if self.install { "Make, build and install" } else { "Make NR2003 track" }).size(15.0).strong());
         if ui.add_enabled(self.making.is_none() && !self.nr_name.trim().is_empty(), go).clicked() {
             self.make_track(ctx, settings);
         }
@@ -437,6 +481,16 @@ impl AcView {
             )).weak());
         }
         ui.label(RichText::new(format!("Saved {}", m.written.ptf.display())).weak());
+        if let Some(i) = &m.installed {
+            if i.ok {
+                ui.colored_label(Color32::from_rgb(120, 200, 120), format!("{}. Start NR2003 and pick it from the track list.", i.message));
+            } else {
+                ui.colored_label(Color32::from_rgb(235, 95, 85), format!("Building and installing stopped: {}", i.message));
+            }
+            for w in i.warnings.iter().take(4) {
+                ui.colored_label(Color32::from_rgb(240, 190, 80), w);
+            }
+        }
         if let Some(sc) = &m.scenery {
             for p in sc.problems.iter().take(4) {
                 ui.colored_label(Color32::from_rgb(240, 190, 80), format!("Scenery: {p}"));

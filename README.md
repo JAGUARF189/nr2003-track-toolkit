@@ -169,6 +169,11 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - Mugello: 404 pieces, within 0.22 m of AC (0.04 m on average), road height within 0.09 m. AC ground on every piece, 614 walls from AC, 241 kerb and 305 gravel strips.
     - Monaco F1 2026: 283 pieces, within 0.11 m.
     - Both pass the checker, and each takes about 1 s.
+  - **Fully automated (option):** tick **Then build and install it into NR2003** and the button becomes **Make, build and install**. After making the track it runs every Build track step (textures, models, pack the `.dat`) and installs it into NR2003's tracks folder.
+    - `track.ini`, cameras and `.lp` files come from your template track when the track has none. The `.lp` files are placeholders until phase 5.
+    - An installed `.dat` is backed up before it's replaced.
+    - It won't install while NR2003 or any program from its folder is running.
+    - `steps::build_and_install` does the same for any workspace track.
   - **After converting:** **Look at it** opens the result in the Look at a track tab, and an orange line shows it over the AC track. To try it in NR2003, use Build track with the same name.
   - **Tested across your AC tracks:** `examples\acbatch.rs` converts every installed AC track and layout. It fixed:
     - layouts kept only under `ui\<layout>`
