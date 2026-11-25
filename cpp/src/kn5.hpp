@@ -39,6 +39,9 @@ struct Material {
     bool alphaTested = false;
     std::vector<std::pair<std::string, std::string>> samplers;   // (slot, texture name)
     std::string diffuse() const;                                  // txDiffuse texture, or ""
+    std::vector<std::pair<std::string, float>> props;             // (name, first value)
+    std::string sampler(const std::string& slot) const;           // texture in a slot, or ""
+    float prop(const std::string& key, float fallback) const;
 };
 
 // A mesh with its vertices already placed in the world (AC coordinates: metres, y up).

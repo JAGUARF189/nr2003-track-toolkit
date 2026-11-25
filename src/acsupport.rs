@@ -78,7 +78,7 @@ fn onto_ground(t: &Track, k: usize, tt: f64, dlat: f64) -> (f64, bool) {
 }
 
 /// A file of a track: loose in its folder, else inside its .dat (any file type).
-fn track_file(dir: &Path, name: &str) -> Option<Vec<u8>> {
+pub fn track_file(dir: &Path, name: &str) -> Option<Vec<u8>> {
     let loose = dir.join(name);
     if loose.is_file() {
         return std::fs::read(loose).ok();

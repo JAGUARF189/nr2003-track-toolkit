@@ -9,10 +9,12 @@
 //
 // `scene` writes everything the 3D view needs to <out> (little endian; str = u32 length + bytes;
 // positions converted to the Track Toolkit's axes: x, y = -AC z, z = AC y, metres):
-//   "ACSCENE1"
+//   "ACSCENE2"
 //   u32 n, n x texture  { str name, u32 w, u32 h, w*h*4 RGBA bytes; or w = h = 0 and
 //                         u32 len + len bytes of a PNG/JPEG for the app to decode (len 0: unreadable) }
-//   u32 n, n x material { str name, str shader, i32 texture (-1 none), u8 alphaTested, u8 blend }
+//   u32 n, n x material { str name, str shader, i32 texture (-1 none), u8 alphaTested, u8 blend,
+//                         i32 detail texture (-1 none, -2 multi-layer with no usable detail; else the
+//                         main surface's picture), f32 its repeat }
 //   u32 n, n x surface  { str key, u8 validTrack, u8 pitlane }
 //   u32 n, n x mesh     { str name, str model file, i32 material, i32 surface (-1 = scenery),
 //                         u8 visible, u8 transparent, u32 nv, nv x float[8] (pos, normal, uv),
@@ -146,6 +148,8 @@ int scene(const std::string& dir, const std::string& layoutName, const std::stri
         int tex;
         bool alpha;
         int blend;
+        int detail;   // multi-layer materials: the main detail texture (-1 none)
+        float mult;   // and how many times it repeats per texture unit
     };
     std::vector<Mat> materials;
     std::vector<std::pair<std::string, kn5::Mesh>> meshes;   // (model file, mesh)
@@ -166,38 +170,74 @@ int scene(const std::string& dir, const std::string& layoutName, const std::stri
         std::map<std::string, const kn5::Texture*> byName;
         for (const auto& tx : m.textures) byName.emplace(tx.name, &tx);
         const int matBase = int(materials.size());
-        for (const auto& mat : m.materials) {
-            int ti = -1;
-            const std::string d = mat.diffuse();
-            if (!d.empty() && texSide > 0) {
-                std::string key = d;
-                for (char& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
-                if (const auto it = texIndex.find(key); it != texIndex.end()) {
-                    ti = it->second;
-                } else if (const auto tx = byName.find(d); tx != byName.end()) {
-                    Tex nt{d, {}, {}};
-                    const auto& bytes = tx->second->dds;
-                    if (bytes.size() >= 4 && std::memcmp(bytes.data(), "DDS ", 4) != 0) {
-                        nt.encoded = bytes;   // PNG/JPEG: the app's image library reads those
-                    } else {
-                        try {
-                            nt.img = dds::decode(bytes.data(), bytes.size(), texSide);
-                        } catch (const std::exception& e) {
-                            ++failed;
-                            std::cerr << "warning: texture " << d << ": " << e.what() << "\n";
-                        }
-                    }
-                    ti = int(textures.size());
-                    texIndex[key] = ti;
-                    if (!texDir.empty()) {
-                        if (nt.img.width || !nt.encoded.empty()) writeTexFile(texDir, ti, nt.img, nt.encoded);
-                        nt.img = {};
-                        nt.encoded.clear();
-                    }
-                    textures.push_back(std::move(nt));
+        // index of a texture (by name) in the scene's list, decoding it the first time
+        const auto texFor = [&](const std::string& d) -> int {
+            if (d.empty() || texSide == 0) return -1;
+            std::string key = d;
+            for (char& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+            if (const auto it = texIndex.find(key); it != texIndex.end()) return it->second;
+            const auto tx = byName.find(d);
+            if (tx == byName.end()) return -1;
+            Tex nt{d, {}, {}};
+            const auto& bytes = tx->second->dds;
+            if (bytes.size() >= 4 && std::memcmp(bytes.data(), "DDS ", 4) != 0) {
+                nt.encoded = bytes;   // PNG/JPEG: the app's image library reads those
+            } else {
+                try {
+                    nt.img = dds::decode(bytes.data(), bytes.size(), texSide);
+                } catch (const std::exception& e) {
+                    ++failed;
+                    std::cerr << "warning: texture " << d << ": " << e.what() << "\n";
                 }
             }
-            materials.push_back({mat.name, mat.shader, ti, mat.alphaTested, mat.blend});
+            const int ti = int(textures.size());
+            texIndex[key] = ti;
+            if (!texDir.empty()) {
+                if (nt.img.width || !nt.encoded.empty()) writeTexFile(texDir, ti, nt.img, nt.encoded);
+                nt.img = {};
+                nt.encoded.clear();
+            }
+            textures.push_back(std::move(nt));
+            return ti;
+        };
+        for (const auto& mat : m.materials) {
+            const int ti = texFor(mat.diffuse());
+            // Multi-layer materials (ksMultilayer...): txDiffuse is a blurry overall colour and
+            // txMask says where each of up to four detail textures shows. The one whose mask
+            // channel covers most is the surface's own picture, tiled by its multiplier.
+            int detail = -1;
+            float mult = 1;
+            const std::string mask = mat.sampler("txMask");
+            if (!mask.empty() && !mat.sampler("txDetailR").empty() && texSide > 0) {
+                double sum[4] = {0, 0, 0, 0};
+                if (const auto mt = byName.find(mask); mt != byName.end() && mt->second->dds.size() >= 4 &&
+                                                       std::memcmp(mt->second->dds.data(), "DDS ", 4) == 0) {
+                    try {
+                        const dds::Image im = dds::decode(mt->second->dds.data(), mt->second->dds.size(), 32);
+                        for (std::size_t p = 0; p + 3 < im.rgba.size(); p += 4)
+                            for (int c = 0; c < 4; ++c) sum[c] += im.rgba[p + c];
+                    } catch (const std::exception&) {
+                    }
+                }
+                // only real detail textures: slots holding a placeholder (nullb.dds) or repeating 0
+                // times are unused
+                const char* ch[4] = {"R", "G", "B", "A"};
+                const auto usable = [&](int c) {
+                    std::string t = mat.sampler(std::string("txDetail") + ch[c]);
+                    for (char& x : t) x = char(std::tolower(static_cast<unsigned char>(x)));
+                    return !t.empty() && t.rfind("null", 0) != 0 && mat.prop(std::string("mult") + ch[c], 1.0f) > 0.0f;
+                };
+                int best = -1;
+                for (int c = 0; c < 4; ++c)
+                    if (usable(c) && (best < 0 || sum[c] > sum[best])) best = c;
+                if (best >= 0) {
+                    detail = texFor(mat.sampler(std::string("txDetail") + ch[best]));
+                    mult = mat.prop(std::string("mult") + ch[best], 1.0f);
+                } else {
+                    detail = -2;   // multi-layer, but no usable detail: only a blurry colour map
+                }
+            }
+            materials.push_back({mat.name, mat.shader, ti, mat.alphaTested, mat.blend, detail, mult});
         }
         for (auto& mesh : m.meshes) {
             for (std::size_t k = 0; k < mesh.pos.size(); k += 3)
@@ -213,7 +253,7 @@ int scene(const std::string& dir, const std::string& layoutName, const std::stri
     }
 
     Out o(outPath);
-    o.raw("ACSCENE1", 8);
+    o.raw("ACSCENE2", 8);
     o.u32(std::uint32_t(textures.size()));
     for (const auto& tx : textures) {
         o.str(tx.name);
@@ -233,6 +273,8 @@ int scene(const std::string& dir, const std::string& layoutName, const std::stri
         o.i32(m.tex);
         o.u8(m.alpha);
         o.u8(std::uint8_t(m.blend));
+        o.i32(m.detail);
+        o.f32(m.mult);
     }
     o.u32(std::uint32_t(surf.size()));
     for (const auto& s : surf) {

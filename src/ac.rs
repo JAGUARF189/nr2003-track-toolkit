@@ -164,6 +164,13 @@ pub struct AcMaterial {
     pub texture: Option<usize>,
     pub alpha_test: bool,
     pub blend: u8,
+    /// Multi-layer materials: their main surface's picture (txDiffuse is only a blurry overall
+    /// colour there), and how many times it repeats per texture unit.
+    pub detail: Option<usize>,
+    pub detail_mult: f32,
+    /// A multi-layer material with no usable detail texture: its txDiffuse is only a blurry
+    /// colour map (Road America's land and grass).
+    pub colour_map_only: bool,
 }
 
 pub struct AcSurface {
@@ -254,7 +261,9 @@ impl AcScene {
     pub fn read(path: &Path, tex_side: u32) -> Result<Self> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let mut c = Cur { b: &bytes, p: 0 };
-        if c.take(8)? != b"ACSCENE1" {
+        let magic = c.take(8)?;
+        let v2 = magic == b"ACSCENE2";
+        if !v2 && magic != b"ACSCENE1" {
             bail!("{} isn't an acdump scene", path.display());
         }
         let mut textures = Vec::new();
@@ -295,7 +304,9 @@ impl AcScene {
             let t = c.i32()?;
             let alpha_test = c.u8()? != 0;
             let blend = c.u8()?;
-            materials.push(AcMaterial { name, shader, texture: usize::try_from(t).ok(), alpha_test, blend });
+            let (d, detail_mult) = if v2 { (c.i32()?, c.f32s(1)?[0]) } else { (-1, 1.0) };
+            let (detail, colour_map_only) = (usize::try_from(d).ok(), d == -2);
+            materials.push(AcMaterial { name, shader, texture: usize::try_from(t).ok(), alpha_test, blend, detail, detail_mult, colour_map_only });
         }
         let mut surfaces = Vec::new();
         for _ in 0..c.count(6)? {

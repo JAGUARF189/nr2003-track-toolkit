@@ -47,16 +47,38 @@ fn main() -> anyhow::Result<()> {
     println!("track: {} pieces, worst {:.2} m, closing gap {:.3} m ({:.1}s)", c.report.pieces, c.report.worst_m, c.report.closing_gap_m, t0.elapsed().as_secs_f64());
 
     let nr = track::model::Track::from_graph(&c.graph)?;
+    opt.ground_texture = acscenery::grass_texture(&c.graph).map(|f| (tpl_dir.clone(), f));
     let plan = acscenery::plan(&scene, &nr, c.report.offset, c.report.height_base, &opt);
     let st = &plan.stats;
     let biggest = plan.cells.iter().map(|c| c.triangles()).max().unwrap_or(0);
     let shapes: usize = plan.cells.iter().map(|c| c.shapes.len()).sum();
     println!(
         "scenery: {} meshes ({} small; {} track, {} hidden, {} 3D grass left out), {} triangles kept, {} on NR's ground dropped, {} degenerate; \
-         {} squares, {} shapes, biggest square {} triangles; {} textures; from {} triangles, merged within {:.3} m ({:.1}s)",
+         {} squares, {} shapes, biggest square {} triangles; {} textures; from {} triangles, merged within {:.3} m, {} meshes left out ({:.1}s)",
         st.meshes, st.meshes_small, st.meshes_track, st.meshes_hidden, st.meshes_grass, st.triangles, st.on_ground, st.degenerate,
-        plan.cells.len(), shapes, biggest, plan.textures.len(), st.triangles_before, st.merge_m, t0.elapsed().as_secs_f64()
+        plan.cells.len(), shapes, biggest, plan.textures.len(), st.triangles_before, st.merge_m, st.meshes_left_out, t0.elapsed().as_secs_f64()
     );
+    if flag("--multilayer") {
+        for m in scene.materials.iter().filter(|m| m.detail.is_some()) {
+            let t = |i: Option<usize>| i.and_then(|i| scene.textures.get(i)).map_or("-".to_string(), |t| t.name.clone());
+            println!("  multi-layer {:<28} {:<24} {} -> {} x{}", m.name, m.shader, t(m.texture), t(m.detail), m.detail_mult);
+        }
+    }
+    if flag("--uvspan") {
+        for m in scene.meshes.iter().filter(|m| m.material.and_then(|k| scene.materials.get(k)).is_some_and(|mt| mt.detail.is_some() || mt.colour_map_only)).take(12) {
+            let (mut lo, mut hi, mut ulo, mut uhi) = ([f32::MAX; 2], [f32::MIN; 2], [f32::MAX; 2], [f32::MIN; 2]);
+            for v in m.verts.chunks_exact(8) {
+                for c in 0..2 {
+                    lo[c] = lo[c].min(v[c]);
+                    hi[c] = hi[c].max(v[c]);
+                    ulo[c] = ulo[c].min(v[6 + c]);
+                    uhi[c] = uhi[c].max(v[6 + c]);
+                }
+            }
+            let mt = &scene.materials[m.material.unwrap()];
+            println!("  uvspan {:<24} {:<14} size {:.0} x {:.0} m, uv span {:.2} x {:.2} -> {:.2} m per uv unit, detail x{}", m.name, mt.name, hi[0] - lo[0], hi[1] - lo[1], uhi[0] - ulo[0], uhi[1] - ulo[1], ((hi[0] - lo[0]).max(hi[1] - lo[1])) / ((uhi[0] - ulo[0]).max(uhi[1] - ulo[1])).max(1e-6), mt.detail_mult);
+        }
+    }
     if flag("--by-material") {
         let mut by: std::collections::HashMap<usize, usize> = Default::default();
         for cell in &plan.cells {

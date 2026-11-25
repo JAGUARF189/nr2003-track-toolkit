@@ -32,6 +32,23 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+/// The ground texture's file in the track (copied from the template, see `Options::ground_texture`).
+pub const GROUND_MIP: &str = "ac_ground.mip";
+
+/// The texture the converted track's grass strips use most (as the track names it).
+pub fn grass_texture(graph: &Graph) -> Option<String> {
+    let t = Track::from_graph(graph).ok()?;
+    let mut count: HashMap<String, usize> = HashMap::new();
+    for s in &t.segments {
+        for f in s.fs.iter().filter(|f| f.surface == 4) {
+            if let Some(tx) = &f.tex {
+                *count.entry(tx.file.clone()).or_default() += 1;
+            }
+        }
+    }
+    count.into_iter().max_by_key(|(_, n)| *n).map(|(f, _)| f)
+}
+
 /// Most triangles in one object. make3do built squares of about 200,000 triangles but failed
 /// ("Could not write out 3do file") on Road America's densest, about 1 million (its tyre walls,
 /// 1.6 million triangles in all); heavier squares are split into quarters.
@@ -133,6 +150,8 @@ pub struct Options {
     /// Show trees, fences and other cut-outs from both sides.
     pub two_sided_cutouts: bool,
     /// Triangles up to this far above NR2003's ground, facing up, count as lying on it (metres).
+    /// 0.5 m left AC's visual road and grass layers (Road America's VISROAD, VISGRASS, groove)
+    /// floating over NR2003's road, smeared with their blend-map textures.
     pub on_ground_m: f64,
     /// Keep the .pas/.psg files make3do was given (for editing in Blender).
     pub keep_pas: bool,
@@ -150,11 +169,16 @@ pub struct Options {
     /// Merge distance (metres; 0 = keep all), scaled for each mesh by how dense it is (see
     /// `mesh_merge`). Set by `plan` to meet `max_triangles`.
     pub merge_m: f64,
+    /// AC meshes left out to meet `max_triangles` (set by `plan`).
+    pub left_out: std::collections::HashSet<usize>,
+    /// For land whose AC texture is only a blurry colour map: a ground texture of the template
+    /// track (its folder, and the file as its grass strips name it), tiled by map position.
+    pub ground_texture: Option<(PathBuf, String)>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { cell_m: 150.0, lod_m: 800.0, detail_lod_m: 300.0, small_m: 8.0, tex_side: 512, two_sided_cutouts: true, on_ground_m: 0.5, keep_pas: false, max_objects: 250, max_object_triangles: MAX_CELL_TRIANGLES, max_triangles: 600_000, merge_m: 0.0 }
+        Self { cell_m: 150.0, lod_m: 800.0, detail_lod_m: 300.0, small_m: 8.0, tex_side: 512, two_sided_cutouts: true, on_ground_m: 1.5, keep_pas: false, max_objects: 250, max_object_triangles: MAX_CELL_TRIANGLES, max_triangles: 600_000, merge_m: 0.0, left_out: Default::default(), ground_texture: None }
     }
 }
 
@@ -172,6 +196,10 @@ pub struct Material {
     /// The .mip it shows, if any.
     pub mip: Option<String>,
     pub alpha: Alpha,
+    /// Texture coordinates are multiplied by this (multi-layer materials' detail repeat).
+    pub uv_scale: f32,
+    /// Texture coordinates from map position instead, one repeat per this many metres (0 = off).
+    pub planar_m: f32,
 }
 
 /// A texture to make: AC texture index, .mip name, and how its alpha is used.
@@ -231,6 +259,8 @@ pub struct Stats {
     /// Scenery triangles before simplifying, and the merge distance used (0 = none needed).
     pub triangles_before: usize,
     pub merge_m: f64,
+    /// AC meshes left out to stay within the budget (the densest first).
+    pub meshes_left_out: usize,
 }
 
 pub struct Plan {
@@ -344,11 +374,43 @@ pub fn plan(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, 
             }
         }
         o.merge_m = hi;
+        // merging is capped (MAX_MERGE_M): if that isn't enough, leave the densest meshes out
+        // first (tyre stacks and the like: few meshes, most of the triangles)
+        let mut total = count_triangles(scene, &o, o.merge_m);
+        if total > opt.max_triangles {
+            let mut order: Vec<(usize, bool, f64, usize)> = scene
+                .meshes
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| is_scenery(scene, m))
+                .map(|(i, m)| (i, is_small(m, opt.small_m), density(m), mesh_cost(scene, &o, m, o.merge_m)))
+                .collect();
+            order.sort_by(|a, b| b.2.total_cmp(&a.2));
+            if std::env::var_os("TTK_SCENERY_DEBUG").is_some() {
+                let mut by_cost = order.clone();
+                by_cost.sort_by(|a, b| b.3.cmp(&a.3));
+                eprintln!("[scenery] {} triangles after merging (budget {}); costliest meshes:", total, opt.max_triangles);
+                for (i, small, d, cost) in by_cost.iter().take(12) {
+                    let m = &scene.meshes[*i];
+                    eprintln!("  {:>8} of {:>8}  density {:>8.1}/m2  small {}  {}", cost, m.indices.len() / 3, d, small, m.name);
+                }
+                let n_small = order.iter().filter(|o| o.1).count();
+                eprintln!("  {} meshes, {} small; total of the 1000 densest: {}", order.len(), n_small, order.iter().take(1000).map(|o| o.3).sum::<usize>());
+            }
+            for (i, _, _, cost) in order {
+                if total <= opt.max_triangles {
+                    break;
+                }
+                o.left_out.insert(i);
+                total -= cost.min(total);
+            }
+        }
     }
     loop {
         let mut p = plan_cells(scene, track, offset, height_base, &o);
         p.stats.triangles_before = before;
         p.stats.merge_m = o.merge_m;
+        p.stats.meshes_left_out = o.left_out.len();
         let n = p.cells.len();
         if n <= opt.max_objects.max(1) || o.cell_m >= 3000.0 {
             // squares too heavy for make3do are split into quarters until they aren't
@@ -366,13 +428,15 @@ fn is_scenery(scene: &AcScene, mesh: &crate::ac::AcMesh) -> bool {
     mesh.surface.is_none() && mesh.visible && !shader.eq_ignore_ascii_case("ksGrass")
 }
 
-/// A mesh's triangles with vertices closer than `merge_m` merged (each group takes its first
-/// vertex; triangles that collapse, and repeats, are dropped). Vertices facing different ways
-/// (another normal octant) stay apart, so corners keep their shape.
-fn merged_triangles(mesh: &crate::ac::AcMesh, merge_m: f64) -> Vec<[u32; 3]> {
+/// A mesh's triangles with vertices closer than `merge_m` merged: each group becomes one
+/// vertex at the group's middle (taking the first one's normal and texture position), and
+/// triangles that collapse, and repeats, are dropped. Vertices facing different ways (another
+/// normal octant) stay apart, so corners keep their shape. Returns the triangles and, when
+/// merging, the mesh's vertices with the groups moved to their middles.
+fn merged_triangles(mesh: &crate::ac::AcMesh, merge_m: f64) -> (Vec<[u32; 3]>, Option<Vec<f32>>) {
     let tris = mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]);
     if merge_m <= 0.0 {
-        return tris.collect();
+        return (tris.collect(), None);
     }
     let nv = mesh.verts.len() / 8;
     let mut first: HashMap<(i32, i32, i32, u8), u32> = HashMap::with_capacity(nv);
@@ -384,17 +448,49 @@ fn merged_triangles(mesh: &crate::ac::AcMesh, merge_m: f64) -> Vec<[u32; 3]> {
             *first.entry((q(v[0]), q(v[1]), q(v[2]), oct)).or_insert(i as u32)
         })
         .collect();
-    let mut seen = std::collections::HashSet::new();
-    tris.filter_map(|t| {
-        let m = [rep[t[0] as usize], rep[t[1] as usize], rep[t[2] as usize]];
-        if m[0] == m[1] || m[1] == m[2] || m[0] == m[2] {
-            return None;
+    // each group's middle
+    let mut sum: HashMap<u32, ([f64; 3], usize)> = HashMap::new();
+    for (i, &r) in rep.iter().enumerate() {
+        let e = sum.entry(r).or_insert(([0.0; 3], 0));
+        for c in 0..3 {
+            e.0[c] += mesh.verts[i * 8 + c] as f64;
         }
-        let mut k = m;
-        k.sort_unstable();
-        seen.insert(k).then_some(m)
-    })
-    .collect()
+        e.1 += 1;
+    }
+    let mut verts = mesh.verts.clone();
+    for (r, (acc, n)) in sum {
+        if n > 1 {
+            for c in 0..3 {
+                verts[r as usize * 8 + c] = (acc[c] / n as f64) as f32;
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let tris = tris
+        .filter_map(|t| {
+            let m = [rep[t[0] as usize], rep[t[1] as usize], rep[t[2] as usize]];
+            if m[0] == m[1] || m[1] == m[2] || m[0] == m[2] {
+                return None;
+            }
+            let mut k = m;
+            k.sort_unstable();
+            seen.insert(k).then_some(m)
+        })
+        .collect();
+    (tris, Some(verts))
+}
+
+/// Under `small_m` across (cones, people, chairs).
+fn is_small(mesh: &crate::ac::AcMesh, small_m: f64) -> bool {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in mesh.verts.chunks_exact(8) {
+        for c in 0..3 {
+            lo[c] = lo[c].min(v[c]);
+            hi[c] = hi[c].max(v[c]);
+        }
+    }
+    let d = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+    (d as f64) < small_m
 }
 
 /// Triangles per square metre of a mesh (over the area of its box's biggest side).
@@ -418,21 +514,28 @@ fn mesh_merge(mesh: &crate::ac::AcMesh, merge_m: f64) -> f64 {
     if merge_m <= 0.0 {
         return 0.0;
     }
-    merge_m * (density(mesh) / 2.0).sqrt().clamp(0.1, 6.0)
+    (merge_m * (density(mesh) / 2.0).sqrt().clamp(0.1, 6.0)).min(MAX_MERGE_M)
 }
+
+/// Furthest any vertex may be merged (metres). Road America's budget once took merging to
+/// tens of metres, which dragged buildings into spikes; past this, meshes are left out instead.
+pub const MAX_MERGE_M: f64 = 1.0;
 
 /// Scenery triangles there would be with `merge_m` (cut-outs counted both ways).
 fn count_triangles(scene: &AcScene, opt: &Options, merge_m: f64) -> usize {
     scene
         .meshes
         .iter()
-        .filter(|m| is_scenery(scene, m))
-        .map(|m| {
-            let cut = opt.two_sided_cutouts
-                && m.material.and_then(|k| scene.materials.get(k)).is_some_and(|mat| mat.blend == 0 && mat.alpha_test);
-            merged_triangles(m, mesh_merge(m, merge_m)).len() * if cut { 2 } else { 1 }
-        })
+        .enumerate()
+        .filter(|(i, m)| is_scenery(scene, m) && !opt.left_out.contains(i))
+        .map(|(_, m)| mesh_cost(scene, opt, m, merge_m))
         .sum()
+}
+
+/// Triangles one mesh would add (cut-outs counted both ways).
+fn mesh_cost(scene: &AcScene, opt: &Options, m: &crate::ac::AcMesh, merge_m: f64) -> usize {
+    let cut = opt.two_sided_cutouts && m.material.and_then(|k| scene.materials.get(k)).is_some_and(|mat| mat.blend == 0 && mat.alpha_test);
+    merged_triangles(m, mesh_merge(m, merge_m)).0.len() * if cut { 2 } else { 1 }
 }
 
 fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, opt: &Options) -> Plan {
@@ -446,8 +549,30 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
     let mut mat_of_ac: Vec<usize> = Vec::with_capacity(scene.materials.len());
     let mut mat_names: Vec<String> = Vec::new();
     for m in &scene.materials {
-        let alpha = alpha_of(m);
-        let mip = m.texture.filter(|&t| t < scene.textures.len()).map(|t| {
+        // multi-layer materials: their main surface's picture, tiled, instead of the blurry
+        // overall colour in txDiffuse (Road America's grass came out as smeared blotches)
+        // AC's own detail tiling can't be read from the material (Road America's grass texture
+        // coordinates span 1 unit over 1.8 km), so the detail picture is tiled every 6 m by map
+        // position
+        let (tex, alpha, uv_scale, planar_m) = match m.detail.filter(|&t| t < scene.textures.len()) {
+            Some(d) => (Some(d), Alpha::Opaque, 1.0, 6.0),
+            None => (m.texture, alpha_of(m), 1.0, 0.0),
+        };
+        // land with only a colour map: the template's grass, tiled every 8 m
+        if m.colour_map_only && opt.ground_texture.is_some() {
+            let mut name: String = format!("m_{}", safe_stem(&m.name)).chars().take(28).collect();
+            let base = name.clone();
+            let mut k = 2;
+            while mat_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                name = format!("{base}{k}");
+                k += 1;
+            }
+            mat_names.push(name.clone());
+            mat_of_ac.push(materials.len());
+            materials.push(Material { name, mip: Some(GROUND_MIP.into()), alpha: Alpha::Opaque, uv_scale: 1.0, planar_m: 8.0 });
+            continue;
+        }
+        let mip = tex.filter(|&t| t < scene.textures.len()).map(|t| {
             let with_alpha = alpha != Alpha::Opaque;
             match textures.iter().find(|j| j.texture == t && (j.alpha != Alpha::Opaque) == with_alpha) {
                 Some(j) => j.mip.clone(),
@@ -467,10 +592,10 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
         }
         mat_names.push(name.clone());
         mat_of_ac.push(materials.len());
-        materials.push(Material { name, mip, alpha });
+        materials.push(Material { name, mip, alpha, uv_scale, planar_m });
     }
     let plain = materials.len();
-    materials.push(Material { name: "m_plain".into(), mip: None, alpha: Alpha::Opaque });
+    materials.push(Material { name: "m_plain".into(), mip: None, alpha: Alpha::Opaque, uv_scale: 1.0, planar_m: 0.0 });
 
     // triangles into squares: (cell key) -> material -> shapes being filled
     struct Filling {
@@ -480,6 +605,8 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
     }
     let mut cells: HashMap<(i32, i32), HashMap<(usize, bool), Filling>> = HashMap::new();
     let world = |v: &[f32]| -> [f64; 3] { [v[0] as f64 - offset[0], v[1] as f64 - offset[1], v[2] as f64 - height_base] };
+    let dbg = std::env::var_os("TTK_SCENERY_DEBUG").is_some();
+    let mut dbg_tally: HashMap<String, (usize, usize, usize, Vec<f64>)> = HashMap::new();
     for (mi, mesh) in scene.meshes.iter().enumerate() {
         if mesh.surface.is_some() {
             stats.meshes_track += 1;
@@ -492,6 +619,9 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
         let shader = mesh.material.and_then(|m| scene.materials.get(m)).map_or("", |m| m.shader.as_str());
         if shader.eq_ignore_ascii_case("ksGrass") {
             stats.meshes_grass += 1;
+            continue;
+        }
+        if opt.left_out.contains(&mi) {
             continue;
         }
         stats.meshes += 1;
@@ -509,8 +639,12 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
         stats.meshes_small += small as usize;
         let mat = mesh.material.and_then(|m| mat_of_ac.get(m).copied()).unwrap_or(plain);
         let both_ways = opt.two_sided_cutouts && materials[mat].alpha == Alpha::Cutout;
-        let vx = |i: u32| &mesh.verts[i as usize * 8..i as usize * 8 + 8];
-        for t in merged_triangles(mesh, mesh_merge(mesh, opt.merge_m)) {
+        let uv_k = materials[mat].uv_scale;
+        let planar = materials[mat].planar_m;
+        let (mtris, moved) = merged_triangles(mesh, mesh_merge(mesh, opt.merge_m));
+        let mverts: &[f32] = moved.as_deref().unwrap_or(&mesh.verts);
+        let vx = |i: u32| &mverts[i as usize * 8..i as usize * 8 + 8];
+        for t in mtris {
             let (a, b, c) = (world(vx(t[0])), world(vx(t[1])), world(vx(t[2])));
             let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
             let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -525,6 +659,17 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
             let agrees = n[0] * vn[0] + n[1] * vn[1] + n[2] * vn[2] >= 0.0;
             let up = if agrees { n[2] / area2 } else { -n[2] / area2 };
             let cen = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0];
+            if dbg && (mesh.name.starts_with("VIS") || mesh.name.starts_with("groove")) {
+                let e = dbg_tally.entry(mesh.name.clone()).or_insert((0, 0, 0, Vec::new()));
+                if up <= 0.5 {
+                    e.0 += 1;
+                } else if let Some(h) = ground.height(cen[0], cen[1]) {
+                    e.3.push(cen[2] - h);
+                } else {
+                    e.1 += 1;
+                }
+                e.2 += 1;
+            }
             if up > 0.5 {
                 if let Some(h) = ground.height(cen[0], cen[1]) {
                     if cen[2] < h + opt.on_ground_m {
@@ -555,7 +700,9 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
                         let p = world(v);
                         let s = if back { -1.0 } else { 1.0 };
                         // world for now; made relative to the square's centre below
-                        shape.verts.push([p[0] as f32, p[1] as f32, p[2] as f32, v[3] * s, v[4] * s, v[5] * s, v[6], 1.0 - v[7]]);
+                        let k = uv_k;
+                        let (u, w) = if planar > 0.0 { ((p[0] / planar as f64) as f32, (p[1] / planar as f64) as f32) } else { (v[6] * k, 1.0 - v[7] * k) };
+                        shape.verts.push([p[0] as f32, p[1] as f32, p[2] as f32, v[3] * s, v[4] * s, v[5] * s, u, w]);
                         (shape.verts.len() - 1) as u32
                     });
                 }
@@ -567,6 +714,15 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
         }
     }
 
+    if dbg {
+        let mut v: Vec<_> = dbg_tally.into_iter().collect();
+        v.sort_by(|a, b| b.1 .2.cmp(&a.1 .2));
+        for (name, (not_up, no_ground, total, mut dz)) in v.into_iter().take(8) {
+            dz.sort_by(|a, b| a.total_cmp(b));
+            let q = |f: f64| dz.get(((dz.len() as f64 - 1.0) * f) as usize).copied().unwrap_or(f64::NAN);
+            eprintln!("[ground] {name}: {total} triangles, {not_up} not facing up, {no_ground} with no NR ground under, height above NR ground 10/50/90%: {:.2} / {:.2} / {:.2} m", q(0.1), q(0.5), q(0.9));
+        }
+    }
     // squares: centred, named by their place on the map
     let mut keys: Vec<(i32, i32)> = cells.keys().copied().collect();
     keys.sort_unstable();
@@ -806,6 +962,13 @@ pub fn build(
         });
         if ours && e.path().is_file() {
             let _ = std::fs::remove_file(e.path());
+        }
+    }
+    // the template's grass, for land that only had a colour map
+    if let Some((dir, file)) = &opt.ground_texture {
+        let base = file.rsplit(['\\', '/']).next().unwrap_or(file);
+        if let Some(bytes) = crate::acsupport::track_file(dir, file).or_else(|| crate::acsupport::track_file(&dir.join("trackmat"), base)).or_else(|| crate::acsupport::track_file(dir, base)) {
+            std::fs::write(track_dir.join(GROUND_MIP), bytes)?;
         }
     }
     let work = track_dir.join("_ttk_scenery");

@@ -251,6 +251,8 @@ impl AcView {
                 let t = ttk::track::model::Track::from_graph(&c.graph)?;
                 let scenery_made = if scenery {
                     say("Sorting AC's scenery into objects…");
+                    let mut sopt = sopt.clone();
+                    sopt.ground_texture = acscenery::grass_texture(&c.graph).map(|f| (template_dir.clone(), f));
                     let plan = acscenery::plan(&scene, &t, c.report.offset, c.report.height_base, &sopt);
                     let stats = plan.stats.clone();
                     match acscenery::build(&plan, &tex_dir, &out, &sandbox, &sopt, &|m| say(m)) {

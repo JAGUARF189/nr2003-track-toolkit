@@ -139,6 +139,18 @@ void readNode(Reader& r, Model& model, const Mat4& parent, const Options& opt, i
 
 }  // namespace
 
+std::string Material::sampler(const std::string& slot) const {
+    for (const auto& [sl, tex] : samplers)
+        if (sl == slot) return tex;
+    return {};
+}
+
+float Material::prop(const std::string& key, float fallback) const {
+    for (const auto& [n, v] : props)
+        if (n == key) return v;
+    return fallback;
+}
+
 std::string Material::diffuse() const {
     for (const auto& [slot, tex] : samplers)
         if (slot == "txDiffuse") return tex;
@@ -196,8 +208,10 @@ Model read(const std::string& path, const Options& opt) {
         r.i32();   // depth mode
         const auto np = r.count(44);
         for (std::int32_t p = 0; p < np; ++p) {
-            r.str();
-            r.skip(40);
+            std::string pname = r.str();
+            const float v = r.f32();   // then a vec2, vec3 and vec4 (unused)
+            r.skip(36);
+            mat.props.emplace_back(std::move(pname), v);
         }
         const auto ns = r.count(12);
         for (std::int32_t s = 0; s < ns; ++s) {
