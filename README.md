@@ -207,6 +207,10 @@ The **Assetto Corsa** tab opens an AC track and shows it in the map and 3D views
     - Shapes are split below make3do's limits: 10,000 vertices and 30,000 faces per shape.
       - A well-joined grid builds up to 16,536 vertices, but loose triangles fail sooner (Road America's bleachers at 16,000).
     - Squares over 250,000 triangles are split into quarters (`sc_<x>_<y>_<q>`).
+  - **Triangle budget:** NR2003 crashes with too much scenery. Road America's 3.4 million crashed, also when cut into 646 small objects, and so did 1.4 million. About 600,000 loads.
+    - So scenery is held to 600,000 triangles (`Options.max_triangles`).
+    - Each mesh's close vertices are merged, scaled by how dense the mesh is, so tyre stacks, fences and props lose detail first, and buildings and land least.
+    - make3do refused a few heavily merged objects, so those are retried in smaller shapes.
   - **Textures:** each AC texture becomes `ac_<name>.mip` (DXT, tiling, up to 256/512/1024 px, your choice).
     - Opaque materials lose their alpha (AC keeps other data there).
     - Cut-outs (trees, fences) get hard edges and are seen from both sides.

@@ -140,11 +140,21 @@ pub struct Options {
     /// (Charlotte_2018_BBMC_Day; Las Vegas 255), so the squares grow until there are at most
     /// this many.
     pub max_objects: usize,
+    /// Most triangles in one object; heavier squares are split into quarters.
+    pub max_object_triangles: usize,
+    /// Most scenery triangles in all (0 = no limit). NR2003 crashed with Road America's 3.4
+    /// million (also when cut into 646 small objects) and with 1.4 million; it loaded about
+    /// 600 thousand (tested 2026-11-24). Dense meshes are simplified (close vertices merged)
+    /// until the scenery fits.
+    pub max_triangles: usize,
+    /// Merge distance (metres; 0 = keep all), scaled for each mesh by how dense it is (see
+    /// `mesh_merge`). Set by `plan` to meet `max_triangles`.
+    pub merge_m: f64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { cell_m: 150.0, lod_m: 800.0, detail_lod_m: 300.0, small_m: 8.0, tex_side: 512, two_sided_cutouts: true, on_ground_m: 0.5, keep_pas: false, max_objects: 250 }
+        Self { cell_m: 150.0, lod_m: 800.0, detail_lod_m: 300.0, small_m: 8.0, tex_side: 512, two_sided_cutouts: true, on_ground_m: 0.5, keep_pas: false, max_objects: 250, max_object_triangles: MAX_CELL_TRIANGLES, max_triangles: 600_000, merge_m: 0.0 }
     }
 }
 
@@ -218,6 +228,9 @@ pub struct Stats {
     pub degenerate: usize,
     /// Size of the squares used (metres): `cell_m`, or bigger to stay within `max_objects`.
     pub cell_m: f64,
+    /// Scenery triangles before simplifying, and the merge distance used (0 = none needed).
+    pub triangles_before: usize,
+    pub merge_m: f64,
 }
 
 pub struct Plan {
@@ -313,17 +326,113 @@ fn mip_name(source: &str, alpha: bool, taken: &mut Vec<String>) -> String {
 /// shifts from AC's coordinates to the NR2003 track's (`acconv::Report`).
 pub fn plan(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, opt: &Options) -> Plan {
     let mut o = opt.clone();
+    // the triangle budget: the smallest merge distance that fits (counting is quick; the
+    // triangles dropped for lying on NR2003's ground come off later, so this errs low)
+    let before = count_triangles(scene, opt, 0.0);
+    if opt.max_triangles > 0 && before > opt.max_triangles {
+        let (mut lo, mut hi) = (0.005f64, 0.005f64);
+        while count_triangles(scene, opt, hi) > opt.max_triangles && hi < 50.0 {
+            lo = hi;
+            hi *= 2.0;
+        }
+        for _ in 0..10 {
+            let mid = (lo * hi).sqrt();
+            if count_triangles(scene, opt, mid) > opt.max_triangles {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        o.merge_m = hi;
+    }
     loop {
         let mut p = plan_cells(scene, track, offset, height_base, &o);
+        p.stats.triangles_before = before;
+        p.stats.merge_m = o.merge_m;
         let n = p.cells.len();
         if n <= opt.max_objects.max(1) || o.cell_m >= 3000.0 {
             // squares too heavy for make3do are split into quarters until they aren't
-            p.cells = p.cells.into_iter().flat_map(|c| split_heavy(c, MAX_CELL_TRIANGLES)).collect();
+            p.cells = p.cells.into_iter().flat_map(|c| split_heavy(c, opt.max_object_triangles.max(1000))).collect();
             return p;
         }
         // squares' count goes roughly with 1 / size²
         o.cell_m = (o.cell_m * (n as f64 / opt.max_objects.max(1) as f64).sqrt() * 1.05).min(3000.0);
     }
+}
+
+/// Is this mesh scenery (not the track, hidden, or AC's 3D grass)?
+fn is_scenery(scene: &AcScene, mesh: &crate::ac::AcMesh) -> bool {
+    let shader = mesh.material.and_then(|m| scene.materials.get(m)).map_or("", |m| m.shader.as_str());
+    mesh.surface.is_none() && mesh.visible && !shader.eq_ignore_ascii_case("ksGrass")
+}
+
+/// A mesh's triangles with vertices closer than `merge_m` merged (each group takes its first
+/// vertex; triangles that collapse, and repeats, are dropped). Vertices facing different ways
+/// (another normal octant) stay apart, so corners keep their shape.
+fn merged_triangles(mesh: &crate::ac::AcMesh, merge_m: f64) -> Vec<[u32; 3]> {
+    let tris = mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]);
+    if merge_m <= 0.0 {
+        return tris.collect();
+    }
+    let nv = mesh.verts.len() / 8;
+    let mut first: HashMap<(i32, i32, i32, u8), u32> = HashMap::with_capacity(nv);
+    let rep: Vec<u32> = (0..nv)
+        .map(|i| {
+            let v = &mesh.verts[i * 8..i * 8 + 8];
+            let q = |x: f32| (x as f64 / merge_m).floor() as i32;
+            let oct = (v[3] >= 0.0) as u8 | ((v[4] >= 0.0) as u8) << 1 | ((v[5] >= 0.0) as u8) << 2;
+            *first.entry((q(v[0]), q(v[1]), q(v[2]), oct)).or_insert(i as u32)
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    tris.filter_map(|t| {
+        let m = [rep[t[0] as usize], rep[t[1] as usize], rep[t[2] as usize]];
+        if m[0] == m[1] || m[1] == m[2] || m[0] == m[2] {
+            return None;
+        }
+        let mut k = m;
+        k.sort_unstable();
+        seen.insert(k).then_some(m)
+    })
+    .collect()
+}
+
+/// Triangles per square metre of a mesh (over the area of its box's biggest side).
+fn density(mesh: &crate::ac::AcMesh) -> f64 {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in mesh.verts.chunks_exact(8) {
+        for c in 0..3 {
+            lo[c] = lo[c].min(v[c]);
+            hi[c] = hi[c].max(v[c]);
+        }
+    }
+    let d: [f64; 3] = std::array::from_fn(|c| ((hi[c] - lo[c]) as f64).max(0.1));
+    let area = (d[0] * d[1]).max(d[0] * d[2]).max(d[1] * d[2]);
+    (mesh.indices.len() / 3) as f64 / area
+}
+
+/// The merge distance for one mesh: `merge_m` scaled by how dense the mesh is against a
+/// building-like 2 triangles per m² (square root, between 0.1x and 6x), so tyre stacks, fences
+/// and props are simplified first and big plain surfaces least.
+fn mesh_merge(mesh: &crate::ac::AcMesh, merge_m: f64) -> f64 {
+    if merge_m <= 0.0 {
+        return 0.0;
+    }
+    merge_m * (density(mesh) / 2.0).sqrt().clamp(0.1, 6.0)
+}
+
+/// Scenery triangles there would be with `merge_m` (cut-outs counted both ways).
+fn count_triangles(scene: &AcScene, opt: &Options, merge_m: f64) -> usize {
+    scene
+        .meshes
+        .iter()
+        .filter(|m| is_scenery(scene, m))
+        .map(|m| {
+            let cut = opt.two_sided_cutouts
+                && m.material.and_then(|k| scene.materials.get(k)).is_some_and(|mat| mat.blend == 0 && mat.alpha_test);
+            merged_triangles(m, mesh_merge(m, merge_m)).len() * if cut { 2 } else { 1 }
+        })
+        .sum()
 }
 
 fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64, opt: &Options) -> Plan {
@@ -401,7 +510,7 @@ fn plan_cells(scene: &AcScene, track: &Track, offset: [f64; 2], height_base: f64
         let mat = mesh.material.and_then(|m| mat_of_ac.get(m).copied()).unwrap_or(plain);
         let both_ways = opt.two_sided_cutouts && materials[mat].alpha == Alpha::Cutout;
         let vx = |i: u32| &mesh.verts[i as usize * 8..i as usize * 8 + 8];
-        for t in mesh.indices.chunks_exact(3) {
+        for t in merged_triangles(mesh, mesh_merge(mesh, opt.merge_m)) {
             let (a, b, c) = (world(vx(t[0])), world(vx(t[1])), world(vx(t[2])));
             let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
             let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -773,8 +882,17 @@ fn make_3do(cell: &Cell, materials: &[Material], track_dir: &Path, sandbox_dir: 
     std::fs::write(work.join(&script), psg(cell, opt.lod_m, opt.detail_lod_m))?;
     let file = format!("{}.3do", cell.name);
     let quiet = Logger::new(|_, _| {});
-    let out = run_tool(&quiet, &sandbox_dir.join("make3do.exe"), &["-s", script.as_str()], work)?;
+    let mut out = run_tool(&quiet, &sandbox_dir.join("make3do.exe"), &["-s", script.as_str()], work)?;
     let made = work.join(&file);
+    if !out.ok() || !made.is_file() {
+        // make3do's limit is on its triangle strips, which loose or merged meshes use up fast:
+        // try again with the shapes cut much smaller
+        let small = Cell { name: cell.name.clone(), centre: cell.centre, shapes: cell.shapes.iter().flat_map(|sh| cut_shape(sh, 3000)).collect() };
+        std::fs::write(work.join(format!("{}.pas", cell.name)), pas(&small, materials))?;
+        std::fs::write(work.join(&script), psg(&small, opt.lod_m, opt.detail_lod_m))?;
+        let _ = std::fs::remove_file(&made);
+        out = run_tool(&quiet, &sandbox_dir.join("make3do.exe"), &["-s", script.as_str()], work)?;
+    }
     if !out.ok() || !made.is_file() {
         bail!("make3do couldn't build {file}: {}", out.last_line());
     }
@@ -785,6 +903,28 @@ fn make_3do(cell: &Cell, materials: &[Material], track_dir: &Path, sandbox_dir: 
         let _ = std::fs::remove_dir_all(work);
     }
     Ok((file, cell.centre))
+}
+
+/// A shape cut into shapes of at most `max_verts` vertices.
+fn cut_shape(sh: &Shape, max_verts: usize) -> Vec<Shape> {
+    let mut out = vec![Shape { material: sh.material, small: sh.small, ..Default::default() }];
+    let mut map: HashMap<u32, u32> = HashMap::new();
+    for t in &sh.tris {
+        if out.last().unwrap().verts.len() + 3 > max_verts {
+            out.push(Shape { material: sh.material, small: sh.small, ..Default::default() });
+            map.clear();
+        }
+        let cur = out.last_mut().unwrap();
+        let mut idx = [0u32; 3];
+        for (k, &vi) in t.iter().enumerate() {
+            idx[k] = *map.entry(vi).or_insert_with(|| {
+                cur.verts.push(sh.verts[vi as usize]);
+                (cur.verts.len() - 1) as u32
+            });
+        }
+        cur.tris.push(idx);
+    }
+    out
 }
 
 /// Place the built objects in the track (once each, at their square's centre, facing 0).

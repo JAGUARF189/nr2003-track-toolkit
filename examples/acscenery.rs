@@ -22,6 +22,12 @@ fn main() -> anyhow::Result<()> {
         opt.lod_m = v;
     }
     opt.keep_pas = flag("--keep-pas");
+    if let Some(v) = val("--budget") {
+        opt.max_triangles = v as usize;
+    }
+    if let Some(v) = val("--object-tris") {
+        opt.max_object_triangles = v as usize;
+    }
     let out = PathBuf::from(&a[4]);
     std::fs::create_dir_all(&out)?;
     let t0 = Instant::now();
@@ -47,9 +53,9 @@ fn main() -> anyhow::Result<()> {
     let shapes: usize = plan.cells.iter().map(|c| c.shapes.len()).sum();
     println!(
         "scenery: {} meshes ({} small; {} track, {} hidden, {} 3D grass left out), {} triangles kept, {} on NR's ground dropped, {} degenerate; \
-         {} squares, {} shapes, biggest square {} triangles; {} textures ({:.1}s)",
+         {} squares, {} shapes, biggest square {} triangles; {} textures; from {} triangles, merged within {:.3} m ({:.1}s)",
         st.meshes, st.meshes_small, st.meshes_track, st.meshes_hidden, st.meshes_grass, st.triangles, st.on_ground, st.degenerate,
-        plan.cells.len(), shapes, biggest, plan.textures.len(), t0.elapsed().as_secs_f64()
+        plan.cells.len(), shapes, biggest, plan.textures.len(), st.triangles_before, st.merge_m, t0.elapsed().as_secs_f64()
     );
     if flag("--by-material") {
         let mut by: std::collections::HashMap<usize, usize> = Default::default();

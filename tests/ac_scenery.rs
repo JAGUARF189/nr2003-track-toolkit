@@ -43,6 +43,8 @@ fn check(name: &str) {
     );
     assert!(!plan.cells.is_empty());
     assert!(plan.cells.len() <= opt.max_objects, "{} objects, squares {:.0} m", plan.cells.len(), st.cell_m);
+    // NR2003 crashes with too much scenery (1.4 million crashed, 600 thousand loads)
+    assert!(st.triangles <= opt.max_triangles, "{} triangles (from {}, merged within {:.2} m)", st.triangles, st.triangles_before, st.merge_m);
     eprintln!("  squares {:.0} m", st.cell_m);
 
     // within make3do's limits, every index in range, names unique

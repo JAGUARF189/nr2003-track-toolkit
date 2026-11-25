@@ -34,6 +34,8 @@ pub struct Support {
     pub flaggers_missing: Vec<String>,
     pub lp_files: Vec<String>,
     pub lap_m: f64,
+    /// Length of the stretch holding the pit stalls.
+    pub pit_lane_m: f64,
     pub ini_written: bool,
 }
 
@@ -134,6 +136,19 @@ pub fn finish(graph: &mut Graph, scene: &AcScene, offset: [f64; 2], template: &G
         v
     };
     let mut pits = spots("AC_PIT_", &mut rep);
+    // in driving order along the shortest stretch of the lap that holds them all (AC may number
+    // them either way, and they may straddle the start line): start after the biggest gap
+    if pits.len() >= 2 {
+        pits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let n = pits.len();
+        let gap_after = (0..n)
+            .max_by(|&i, &j| {
+                let g = |k: usize| (pits[(k + 1) % n].0 - pits[k].0).rem_euclid(lap);
+                g(i).total_cmp(&g(j))
+            })
+            .unwrap_or(n - 1);
+        pits.rotate_left((gap_after + 1) % n);
+    }
     let mut grid = spots("AC_START_", &mut rep);
     rep.pits_from_ac = pits.len();
     rep.grid_from_ac = grid.len();
@@ -160,6 +175,7 @@ pub fn finish(graph: &mut Graph, scene: &AcScene, offset: [f64; 2], template: &G
         }
     };
     let pit_step = if pits.len() >= 2 { ((pits[pits.len() - 1].0 - pits[0].0).rem_euclid(lap) / (pits.len() - 1) as f64).clamp(6.0, 20.0) } else { 9.0 };
+    rep.pit_lane_m = if pits.len() >= 2 { (pits[pits.len() - 1].0 - pits[0].0).rem_euclid(lap) } else { 0.0 };
     let grid_back = if grid.len() >= 3 { -((grid[0].0 - grid[2].0).rem_euclid(lap)).clamp(5.0, 16.0) } else { -8.0 };
 
     // --- track.ini: the template's, made this track's
@@ -232,6 +248,9 @@ pub fn finish(graph: &mut Graph, scene: &AcScene, offset: [f64; 2], template: &G
             }
         } else if sec == "spcc" && ini.get(&sec, "num_named_sections").is_some() {
             ini.set(&sec, "num_named_sections", "0");
+        } else if sec.starts_with("apprule") && ini.get(&sec, "num_areas").is_some() {
+            // the template's own rule areas (Watkins Glen's inner loop) would sit on this road
+            ini.set(&sec, "num_areas", "0");
         }
     }
     std::fs::create_dir_all(out)?;
